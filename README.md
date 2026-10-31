@@ -216,6 +216,7 @@ Documents may be written by third parties (prompt injection). See [SECURITY.md](
 npm install
 npm run build
 npm test         # fake fetch and in-memory MCP client: never touches a real drive
+npm run test:start   # runs the built server as a process, against a local fake server
 npm run typecheck
 ```
 

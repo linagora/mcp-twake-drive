@@ -18,6 +18,8 @@ import { join } from 'node:path';
 
 
 async function main(): Promise<void> {
+  // The cozy-* packages log through console.log, and stdout carries JSON-RPC.
+  console.log = console.error;
   const config = loadConfig();
   const tokens: TokenSource = config.tokenCommand
     ? new CommandTokenProvider(config.tokenCommand)
