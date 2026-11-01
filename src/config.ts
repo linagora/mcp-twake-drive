@@ -15,6 +15,8 @@ export interface Config {
   cacheDir: string;
   maxTextChars: number;
   timeoutMs: number;
+  /** Prior approval of every write: elicit = the server asks the user (MCP elicitation); client = the MCP client confirms. */
+  approval?: { mode: 'elicit' | 'client'; language: 'en' | 'fr'; timeoutMs: number };
 }
 
 /** `alice.twake.example.com` -> `alice-drive.twake.example.com` (Cozy app sub-domain convention). */
@@ -49,5 +51,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cacheDir: expandHome(env.TWAKE_DRIVE_CACHE_DIR ?? join(env.XDG_CACHE_HOME ?? '~/.cache', 'mcp-twake-drive')),
     maxTextChars: Number(env.TWAKE_DRIVE_MAX_TEXT_CHARS ?? 60000),
     timeoutMs: Number(env.TWAKE_DRIVE_TIMEOUT_MS ?? 60000),
+    approval: approvalOf(env),
   };
+}
+
+function approvalOf(env: NodeJS.ProcessEnv): NonNullable<Config['approval']> {
+  const mode = (env.TWAKE_DRIVE_APPROVAL ?? 'elicit').toLowerCase();
+  if (mode !== 'elicit' && mode !== 'client') throw new Error('TWAKE_DRIVE_APPROVAL must be elicit or client');
+  const timeoutMs = Number(env.TWAKE_DRIVE_APPROVAL_TIMEOUT_MS ?? 600000);
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) throw new Error('TWAKE_DRIVE_APPROVAL_TIMEOUT_MS must be a number of milliseconds');
+  return { mode, language: (env.USER_LANGUAGE ?? '').toLowerCase().startsWith('fr') ? 'fr' : 'en', timeoutMs };
 }

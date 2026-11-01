@@ -53,6 +53,8 @@ Used together, they let one assistant prepare a meeting from the invitation, the
 
 ⚠️ = makes data public or deletes it for good. Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`).
 
+**Every write is approved by you first.** Before a Create, Organise, Share or Irreversible tool changes anything, in My Drive or in a shared drive, the server itself shows you the exact action through MCP elicitation (see [Prior approval](#prior-approval)) and acts only on your explicit OK. Reading, searching and downloading need no approval.
+
 ### Highlights
 
 - **Paths or ids**: items are addressed by `id` or by absolute `path` (`/Documents/report.pdf`); items in a **shared drive** take an extra `drive_id` (from `list_shared_drives`).
@@ -98,8 +100,29 @@ npm run build          # then run: node build/index.js
 | `TWAKE_DRIVE_CACHE_DIR` | no | Search index location, default `~/.cache/mcp-twake-drive` |
 | `TWAKE_DRIVE_MAX_TEXT_CHARS` | no | `read_file` truncation, default `60000` |
 | `TWAKE_DRIVE_TIMEOUT_MS` | no | HTTP request timeout |
+| `TWAKE_DRIVE_APPROVAL` | no | `elicit` (default): the server asks you before every write; `client`: your MCP client confirms |
+| `TWAKE_DRIVE_APPROVAL_TIMEOUT_MS` | no | How long an approval prompt waits for your answer, default `600000` |
+| `USER_LANGUAGE` | no | Language of the approval prompts, `en` (default) or `fr` |
 
 \* one of the two.
+
+### Prior approval
+
+With `TWAKE_DRIVE_APPROVAL=elicit` (the default), every write tool sends the MCP client an [elicitation](https://modelcontextprotocol.io/specification/draft/client/elicitation) request before it writes, for instance:
+
+```
+Twake Drive: Move
+As: alice.twake.example.com (your account)
+Drive: My Drive
+Item: /Docs/Report.pdf (2.0 MB)
+Destination: /Archives
+
+Ref. 3f9a1c · Accept to do it now, refuse to cancel.
+```
+
+- The prompt shows the drive (My Drive or the shared drive's name), the full paths, what changes (old → new name or tags, the content of a text upload, the rights and expiry of a public link, the items an empty trash destroys).
+- The server writes only on *accept*. A refusal, a dismissal, a timeout or an error changes nothing, and the tool tells the assistant not to retry.
+- A client without elicitation support gets an error and nothing is written. Set `TWAKE_DRIVE_APPROVAL=client` only if your MCP client asks you to confirm every write tool itself.
 
 ### Getting a token
 
@@ -153,9 +176,17 @@ mcp_servers:
     env:
       TWAKE_DRIVE_URL: https://alice.twake.example.com
       TWAKE_DRIVE_TOKEN_COMMAND: /usr/local/bin/my-token-broker drive-token --json
+      TWAKE_DRIVE_APPROVAL_TIMEOUT_MS: "330000"
+      USER_LANGUAGE: fr
+    timeout: 420            # longer than the approval wait
+    elicitation:
+      enabled: true
+      timeout: 300
     tools:
       exclude: [delete_permanently, empty_trash]
 ```
+
+Hermes shows the approval prompts in the desktop app, the terminal or on your messaging platform, and declines them where nobody can answer (cron jobs, one-shot queries).
 
 ### Other MCP clients
 
@@ -164,7 +195,7 @@ Any client that can launch a stdio MCP server works: command `npx`, arguments `-
 ## Recommended safe configuration
 
 - Exclude `delete_permanently` and `empty_trash` in your MCP client: `trash_item` is enough for day-to-day use and can be undone with `restore_from_trash`.
-- Ask the assistant to confirm the item, the rights, the password and the expiry before `create_share_link`: a public link is reachable by **anyone** who has it.
+- Keep `TWAKE_DRIVE_APPROVAL=elicit` (the default): every write waits for your OK on the exact action. Read the rights and expiry carefully before accepting `create_share_link`: a public link is reachable by **anyone** who has it.
 - Keep the default `on_conflict: error` for uploads, so an existing file is never overwritten silently.
 
 Documents may be written by third parties (prompt injection). See [SECURITY.md](SECURITY.md).

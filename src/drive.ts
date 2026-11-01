@@ -156,16 +156,30 @@ export class DriveClient {
     );
   }
 
-  /** Resolve an item from an id or an absolute path (root when both are absent). */
+  private roots = new Map<string, string>();
+
+  /** Root folder of a drive: the instance root, or the folder a shared drive shares (its first rule). */
+  async rootId(driveId?: string): Promise<string> {
+    if (!driveId) return ROOT_DIR_ID;
+    const known = this.roots.get(driveId);
+    if (known) return known;
+    const d = (await this.sharedDrives()).find((x) => x.id === driveId);
+    const root = d?.attributes.rules?.[0]?.values?.[0];
+    if (!root) throw new DriveError(`Unknown shared drive ${driveId}`, 404, 'Use list_shared_drives to get a valid drive_id');
+    this.roots.set(driveId, root);
+    return root;
+  }
+
+  /** Resolve an item from an id or an absolute path (root of the drive when both are absent). */
   async resolve(ref: { id?: string; path?: string }, driveId?: string, page?: { limit?: number; cursor?: string }) {
     if (ref.id) return this.stat(ref.id, driveId, page);
     if (ref.path && ref.path !== '/') return this.statByPath(ref.path, driveId, page);
-    return this.stat(ROOT_DIR_ID, driveId, page);
+    return this.stat(await this.rootId(driveId), driveId, page);
   }
 
   async resolveDirId(ref: { id?: string; path?: string }, driveId?: string): Promise<string> {
     if (ref.id) return ref.id;
-    if (!ref.path || ref.path === '/') return ROOT_DIR_ID;
+    if (!ref.path || ref.path === '/') return this.rootId(driveId);
     const doc = await this.statByPath(ref.path, driveId, { limit: 1 });
     if (doc.data.attributes.type !== 'directory') throw new DriveError(`${ref.path} is a file, not a folder`, 400);
     return doc.data.id;

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { DriveClient, DriveError, escapeRegex, normalizePath } from '../src/drive.js';
 import { deriveAppUrl, loadConfig, type Config } from '../src/config.js';
 import { isTar, isTextLike, markdownFromTar, summarize, variantName, withExtension } from '../src/format.js';
@@ -157,13 +158,18 @@ describe('MCP tools (in-memory)', () => {
     const drive = new DriveClient(config, tokens(), impl);
     registerTools(server, drive, new FileIndex(drive, `/tmp/twake-drive-test-${process.pid}-${Math.random()}.json`));
     const [a, b] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: 'c', version: '0' });
+    const prompts: string[] = [];
+    const client = new Client({ name: 'c', version: '0' }, { capabilities: { elicitation: { form: {} } } });
+    client.setRequestHandler(ElicitRequestSchema, async (req) => {
+      prompts.push(req.params.message);
+      return { action: 'accept', content: {} };
+    });
     await Promise.all([server.connect(a), client.connect(b)]);
     const call = async (name: string, args: Record<string, unknown>) => {
       const r: any = await client.callTool({ name, arguments: args });
       return { error: r.isError === true, text: r.content[0].text as string };
     };
-    return { client, call, calls };
+    return { client, call, calls, prompts };
   }
 
   it('exposes the expected tools', async () => {
