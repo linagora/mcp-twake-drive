@@ -4,6 +4,12 @@ All notable changes to mcp-twake-drive are documented here. The format follows [
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-01
+
+### Changed
+- First npm release. Dependencies: TypeScript 7, vitest 5, @types/node 26; CI actions v7.
+- The version shown at startup and to MCP clients is read from package.json.
+
 ## [0.1.0] - 2026-10-31
 
 ### Added

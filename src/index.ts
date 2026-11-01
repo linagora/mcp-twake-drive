@@ -6,6 +6,7 @@
  * optional TWAKE_DRIVE_APP_URL, TWAKE_DRIVE_DOWNLOAD_DIR, TWAKE_DRIVE_MAX_TEXT_CHARS.
  * Logs go to stderr only: stdout carries JSON-RPC.
  */
+import { VERSION } from './version.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { loadConfig } from './config.js';
@@ -15,7 +16,6 @@ import { registerTools } from './tools.js';
 import { FileIndex } from './file-index.js';
 import { join } from 'node:path';
 
-const VERSION = '0.1.0';
 
 async function main(): Promise<void> {
   const config = loadConfig();
