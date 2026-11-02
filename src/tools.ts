@@ -162,7 +162,9 @@ export function registerTools(
         );
       }
       if (e instanceof ApprovalUnavailable) return { ...text(`Not done: ${e.message}`), isError: true };
-      return { ...text(errorLines(e).join('\n')), isError: true };
+      const lines = errorLines(e);
+      if (stack.refreshFailure) lines.push(stack.refreshFailure.message);
+      return { ...text(lines.join('\n')), isError: true };
     }
   };
 
@@ -1015,8 +1017,9 @@ export function registerTools(
       const meta = (await resolve(a, undefined)).data;
       const permissions = client.collection('io.cozy.permissions');
       const links: CozyDoc[] = (await permissions.fetchAllLinks({ _type: FILES_DOCTYPE })).data;
+      // shortcut: revokeSharingLink reads the `files` rule only and throws on any other name, use it once it reads them all.
       const matching = links.filter((p) =>
-        Object.values(p.attributes.permissions ?? {}).some((r: any) => (r.values ?? []).includes(meta.id))
+        Object.values(p.attributes.permissions ?? {}).some((r: any) => r.values?.includes(meta.id))
       );
       if (matching.length) {
         await approver.confirm({ action: 'revoke_share_link', details: [['item', await itemLabel(meta)], ['links', String(matching.length)]] });
@@ -1078,12 +1081,11 @@ export function linkSummary(p: CozyDoc, baseUrl: string) {
   const a = p.attributes ?? {};
   const code = a.shortcodes?.email ?? a.shortcodes?.code ?? a.codes?.email ?? a.codes?.code;
   const rules = Object.values(a.permissions ?? {}) as Array<{ verbs?: string[]; values?: string[] }>;
-  const verbs = rules.flatMap((r) => r.verbs ?? []);
   return {
     link_id: p.id,
     url: code ? webLink(baseUrl, { pathname: '/public', searchParams: [['sharecode', code]] }) : undefined,
     file_ids: rules.flatMap((r) => r.values ?? []),
-    rights: verbs.some((v) => v !== 'GET') ? 'edit' : 'read-only',
+    rights: rules.every((r) => (models.permission as any).isReadOnly(r)) ? 'read-only' : 'edit',
     password: a.password ? true : undefined,
     expires_at: a.expires_at,
     created_at: a.cozyMetadata?.createdAt,
