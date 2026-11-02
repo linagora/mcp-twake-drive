@@ -31,7 +31,8 @@ Tests never touch a real server: they use mocks and fixtures. Do not add tests t
 ```
 src/
   config.ts        # environment validation
-  drive.ts         # cozy-stack HTTP client (files, notes, sharings, permissions)
+  drive.ts         # cozy-client plugged on the token source
+  queries.ts       # every Q() definition, alias and fetch policy
   file-index.ts    # local metadata index used by search_files
   token-command.ts # access token from an external broker
   tools.ts         # MCP tool implementations

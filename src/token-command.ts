@@ -13,15 +13,11 @@ export class CommandTokenProvider {
   private cached: { token: string; expiresAt: number } | null = null;
   private pending: Promise<string> | null = null;
 
-  constructor(
-    private readonly command: string,
-    private readonly options: { defaultTtlSeconds?: number; marginSeconds?: number; timeoutMs?: number } = {}
-  ) {}
+  constructor(private readonly command: string) {}
 
   /** Return a valid access token, running the command only when needed. */
   async getToken(): Promise<string> {
-    const margin = (this.options.marginSeconds ?? 60) * 1000;
-    if (this.cached && Date.now() + margin < this.cached.expiresAt) {
+    if (this.cached && Date.now() + 60_000 < this.cached.expiresAt) {
       return this.cached.token;
     }
     if (!this.pending) {
@@ -42,7 +38,7 @@ export class CommandTokenProvider {
       execFile(
         '/bin/sh',
         ['-c', this.command],
-        { timeout: this.options.timeoutMs ?? 30000, maxBuffer: 1024 * 1024 },
+        { timeout: 30000, maxBuffer: 1024 * 1024 },
         (error, stdout, stderr) => {
           if (error) {
             const detail = String(stderr || '').trim().split('\n').slice(-1)[0] || error.message;
@@ -55,7 +51,7 @@ export class CommandTokenProvider {
             return;
           }
           let token = out;
-          let expiresAt = Date.now() + (this.options.defaultTtlSeconds ?? 60) * 1000;
+          let expiresAt = Date.now() + 60_000;
           if (out.startsWith('{')) {
             try {
               const parsed = JSON.parse(out) as { access_token?: unknown; expires_at?: unknown };

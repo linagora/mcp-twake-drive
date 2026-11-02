@@ -4,6 +4,24 @@ All notable changes to mcp-twake-drive are documented here. The format follows [
 
 ## [Unreleased]
 
+### Added
+- `cursor` and `next_cursor` on `list_recent_files` and `list_favorites`.
+
+### Changed
+- All stack access goes through `cozy-client`, with indexed queries for recent files and favourites.
+- The search index is built at the first `search_files`, not at launch.
+- `list_recent_files` with `in_path` covers the files directly inside the folder, and the path must match exactly.
+- `list_share_links` and `revoke_share_link` go through every page of links.
+- `on_conflict: rename` counts from ` (1)`, and tells the free name before sending the file.
+- Stack errors read `HTTP <status> (<detail>)`, without the method and the route.
+- Sizes read `512 Bytes` and `1 KB`, not `512 B` and `1.0 KB`, and a downloaded copy counts from ` (1)` like `on_conflict: rename`.
+- The `web_app` address and public links end with `#/`.
+- `create_folder` without `parents` names the direct parent when it is missing.
+
+### Removed
+- `TWAKE_DRIVE_TIMEOUT_MS`: cozy-client has no request timeout.
+- `TWAKE_DRIVE_APP_URL`: links always use the `<instance>-drive.<domain>` form.
+
 ## [0.3.0] - 2026-11-02
 
 ### Changed

@@ -1,20 +1,21 @@
 import { mkdir, readFile, realpath, writeFile, stat as fsStat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, posix, relative, resolve as resolvePath, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { DriveClient, DriveError, ROOT_DIR_ID, TRASH_DIR_ID, escapeRegex, normalizePath, type CozyDoc } from './drive.js';
+import { models } from 'cozy-client';
+import type { Config } from './config.js';
+import { ROOT_DIR_ID, type CozyDoc } from './drive.js';
 import {
-  guessMime,
-  humanSize,
-  isTar,
-  isTextLike,
-  markdownFromTar,
-  summarize,
-  variantName,
-  withExtension,
-} from './format.js';
+  FILES_DOCTYPE,
+  TRASH_DIR_ID,
+  buildDiskUsageQuery,
+  buildFavoritesQuery,
+  buildRecentFilesInFolderQuery,
+  buildRecentFilesQuery,
+} from './queries.js';
+import { isTar, isTextLike, markdownFromTar, summarize, webLink, withExtension } from './format.js';
 import type { FileIndex, Hit } from './file-index.js';
 import { Approver, ApprovalUnavailable, NotApproved, type ApprovalMode, type Language } from './approval.js';
 
@@ -46,36 +47,37 @@ function text(value: unknown) {
   return { content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] };
 }
 
-function wrap<A>(fn: (args: A) => Promise<unknown>) {
-  return async (args: A) => {
-    try {
-      return text(await fn(args));
-    } catch (e) {
-      if (e instanceof NotApproved) {
-        return text(
-          e.outcome === 'decline'
-            ? 'Not done: the user refused this action, nothing was changed in the drive. Do not retry unless the user asks again.'
-            : 'Not done: no answer to the approval request, nothing was changed in the drive. Do not retry unless the user asks again.'
-        );
-      }
-      if (e instanceof ApprovalUnavailable) return { ...text(`Not done: ${e.message}`), isError: true };
-      const err = e as DriveError;
-      const lines = [`Error: ${err.message}`];
-      if (err.hint) lines.push(`How to fix: ${err.hint}`);
-      return { ...text(lines.join('\n')), isError: true };
-    }
-  };
+const HINTS: Record<number, string> = {
+  401: 'The Twake Drive token was refused. Run `twake-token drive-check`; if the grant is revoked, the user must run `twake-token drive-authorize --renew`.',
+  403: 'Not allowed: the OAuth scope or the sharing rights do not cover this operation.',
+  404: 'Not found: check the id or the path (paths are absolute, e.g. /Documents/report.pdf).',
+  409: 'Conflict: an item with the same name already exists in the destination.',
+  412: 'The document changed meanwhile (revision mismatch): fetch it again and retry.',
+  413: 'The file is too large for the remaining quota.',
+};
+
+function stackDetail(reason: any): string {
+  if (typeof reason === 'string') return reason.slice(0, 200);
+  return reason?.errors?.[0]?.detail ?? reason?.errors?.[0]?.title ?? reason?.error ?? reason?.message ?? '';
+}
+
+function errorLines(e: any): string[] {
+  if (e.status === undefined) return [e instanceof TypeError ? `Error: Twake Drive did not answer: ${e.message}` : `Error: ${e.message}`];
+  const detail = stackDetail(e.reason);
+  // The stack refuses a token with a 400.
+  const hint = /token/i.test(detail) ? HINTS[401] : HINTS[e.status];
+  return [`Error: HTTP ${e.status}${detail ? ` (${detail})` : ''}`, ...(hint ? [`How to fix: ${hint}`] : [])];
 }
 
 function requireRef(ref: Ref, what = 'item'): void {
-  if (!ref.id && !ref.path) throw new DriveError(`Give the ${what} id or path`, 400);
+  if (!ref.id && !ref.path) throw new Error(`Give the ${what} id or path`);
 }
 
 async function loadBytes(args: { local_path?: string; content?: string; content_base64?: string }, uploadDir: string): Promise<Uint8Array> {
   const given = [args.local_path, args.content, args.content_base64].filter((v) => v !== undefined).length;
-  if (given !== 1) throw new DriveError('Give exactly one of local_path, content or content_base64', 400);
+  if (given !== 1) throw new Error('Give exactly one of local_path, content or content_base64');
   if (args.local_path !== undefined) {
-    if (!isAbsolute(args.local_path)) throw new DriveError('local_path must be absolute', 400);
+    if (!isAbsolute(args.local_path)) throw new Error('local_path must be absolute');
     await assertInside(uploadDir, args.local_path, 'TWAKE_DRIVE_UPLOAD_DIR');
     return new Uint8Array(await readFile(args.local_path));
   }
@@ -90,31 +92,34 @@ async function assertInside(root: string, target: string, variable: string): Pro
   while (!existsSync(existing) && dirname(existing) !== existing) existing = dirname(existing);
   const rel = relative(await realpath(root), await realpath(existing));
   if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-    throw new DriveError(`Local path must stay inside ${root} (${variable})`, 400);
+    throw new Error(`Local path must stay inside ${root} (${variable})`);
   }
 }
 
 export function registerTools(
   server: McpServer,
-  drive: DriveClient,
+  client: any,
+  config: Config,
   index: FileIndex,
   opts: { approval?: { mode: ApprovalMode; language: Language; timeoutMs: number } } = {}
 ): void {
-  const app = drive.config.appUrl;
-  const approval = opts.approval ?? drive.config.approval ?? { mode: 'elicit' as const, language: 'en' as const, timeoutMs: 600_000 };
-  const approver = new Approver(server.server, { ...approval, as: new URL(drive.config.baseUrl).host });
+  const stack = client.getStackClient();
+  const approval = opts.approval ?? config.approval ?? { mode: 'elicit' as const, language: 'en' as const, timeoutMs: 600_000 };
+  const approver = new Approver(server.server, { ...approval, as: new URL(config.baseUrl).host });
   const L = (k: Parameters<Approver['label']>[0]) => approver.label(k);
+  const humanSize = (size: number): string => client.collection(FILES_DOCTYPE).getBeautifulSize({ size }, 1);
+  const sharedDrives = async (): Promise<CozyDoc[]> => (await client.collection('io.cozy.sharings').fetchSharedDrives()).data;
   /** "My Drive" or "Test team (shared drive)". */
   const driveLabel = async (driveId?: string): Promise<string> => {
     if (!driveId) return L('my_drive');
-    const d = (await drive.sharedDrives().catch(() => [] as CozyDoc[])).find((x) => x.id === driveId);
+    const d = (await sharedDrives().catch(() => [] as CozyDoc[])).find((x) => x.id === driveId);
     const name = d?.attributes.description ?? d?.attributes.rules?.[0]?.title ?? driveId;
     return `${name} (${L('shared_drive')})`;
   };
   /** Path of a folder for the prompt (its id when it cannot be read). */
   const folderLabel = async (dirId: string, driveId?: string): Promise<string> => {
     try {
-      return (await drive.stat(dirId, driveId, { limit: 1 })).data.attributes.path ?? dirId;
+      return (await client.collection(FILES_DOCTYPE, { driveId }).statById(dirId, { 'page[limit]': 1 })).data.attributes.path ?? dirId;
     } catch {
       return dirId;
     }
@@ -131,71 +136,77 @@ export function registerTools(
   const sourceLabel = (a: { local_path?: string; content?: string; content_base64?: string }, bytes: Uint8Array) =>
     a.local_path ? a.local_path : a.content !== undefined ? `${L('text')} (${humanSize(bytes.length)})` : `base64 (${humanSize(bytes.length)})`;
   const preview = (a: { content?: string }) => (a.content !== undefined ? a.content : undefined);
-  const hitSummary = (h: Hit) =>
-    summarize(
-      { id: h.id, attributes: { type: h.type, name: h.name, dir_id: h.dir_id, path: h.path, mime: h.mime, class: h.class, size: h.size, updated_at: h.updated_at } },
-      app
-    );
-  const sum = (doc: CozyDoc, extra: { dirPath?: string; driveId?: string } = {}) => summarize(doc, app, extra);
+  const roots = new Map<string, string>();
+  /** Root folder of a drive: the instance root, or the folder a shared drive shares (its first rule). */
+  const rootId = async (driveId?: string): Promise<string> => {
+    if (!driveId) return ROOT_DIR_ID;
+    const known = roots.get(driveId);
+    if (known) return known;
+    const root = (await sharedDrives()).find((x) => x.id === driveId)?.attributes.rules?.[0]?.values?.[0];
+    if (!root) throw new Error(`Unknown shared drive ${driveId}: use list_shared_drives to get a valid drive_id`);
+    roots.set(driveId, root);
+    return root;
+  };
 
-  /** Folder paths: from the local index, else one stat per unknown folder. */
-  const folderPaths = async (dirIds: string[]): Promise<Record<string, string>> => {
-    const out: Record<string, string> = {};
-    const unique = [...new Set(dirIds.filter(Boolean))];
-    await index.sync().catch(() => {});
-    const missing: string[] = [];
-    for (const id of unique) {
-      const p = index.dirPath(id);
-      if (p) out[id] = p;
-      else missing.push(id);
+  const wrap = <A>(fn: (args: A) => Promise<unknown>) => async (args: A) => {
+    try {
+      // Short-lived tokens: every tool call starts from a valid one, also for the calls that bypass fetchJSON.
+      await stack.loadToken();
+      return text(await fn(args));
+    } catch (e) {
+      if (e instanceof NotApproved) {
+        return text(
+          e.outcome === 'decline'
+            ? 'Not done: the user refused this action, nothing was changed in the drive. Do not retry unless the user asks again.'
+            : 'Not done: no answer to the approval request, nothing was changed in the drive. Do not retry unless the user asks again.'
+        );
+      }
+      if (e instanceof ApprovalUnavailable) return { ...text(`Not done: ${e.message}`), isError: true };
+      return { ...text(errorLines(e).join('\n')), isError: true };
     }
-    await Promise.all(
-      missing.slice(0, 30).map(async (id) => {
-        try {
-          const p = (await drive.stat(id, undefined, { limit: 1 })).data.attributes.path;
-          if (p) out[id] = p;
-        } catch {
-          /* unknown folder: no path */
-        }
-      })
-    );
-    return out;
   };
 
-  /** Summaries of files enriched with their folder path. */
-  const withPaths = async (docs: CozyDoc[]) => {
-    const paths = await folderPaths(docs.filter((d) => d.attributes.type !== 'directory').map((d) => d.attributes.dir_id));
-    return docs.map((d) => sum(d, { dirPath: paths[d.attributes.dir_id] }));
+  const statByPath = (path: string, driveId?: string, page: { limit: number; cursor?: string } = { limit: 1 }) => {
+    const query = new URLSearchParams({ Path: posix.resolve('/', path.trim()), 'page[limit]': String(page.limit) });
+    if (page.cursor) query.set('page[cursor]', page.cursor);
+    // FileCollection.statByPath() carries no page.
+    return stack.fetchJSON('GET', `${client.collection(FILES_DOCTYPE, { driveId }).prefix}/metadata?${query}`);
   };
+
+  /** An item from an id or an absolute path (root of the drive when both are absent). */
+  const resolve = async (ref: { id?: string; path?: string }, driveId?: string, page: { limit: number; cursor?: string } = { limit: 1 }) => {
+    if (ref.path && ref.path !== '/' && !ref.id) return statByPath(ref.path, driveId, page);
+    // Q().getById() carries no page: a folder would bring 30 children, and listing would need a Mango index to build.
+    return client.collection(FILES_DOCTYPE, { driveId }).statById(ref.id ?? (await rootId(driveId)), { 'page[limit]': page.limit, 'page[cursor]': page.cursor });
+  };
+
+  const resolveDirId = async (ref: { id?: string; path?: string }, driveId?: string): Promise<string> => {
+    if (ref.id) return ref.id;
+    if (!ref.path || ref.path === '/') return rootId(driveId);
+    const doc = await statByPath(ref.path, driveId);
+    if (doc.data.attributes.type !== 'directory') throw new Error(`${ref.path} is a file, not a folder`);
+    return doc.data.id;
+  };
+
+  const sum = (doc: CozyDoc, extra: { dirPath?: string; driveId?: string } = {}) => summarize(doc, config.baseUrl, extra);
 
   /** Upload with a name-conflict policy. */
   const uploadWithPolicy = async (
     dirId: string,
     name: string,
     bytes: Uint8Array,
-    mime: string,
+    mime: string | undefined,
     onConflict: 'error' | 'rename' | 'overwrite',
     driveId?: string
   ): Promise<{ doc: CozyDoc; action: string }> => {
-    try {
-      return { doc: await drive.upload(dirId, name, bytes, mime, driveId), action: 'created' };
-    } catch (e) {
-      if (!(e instanceof DriveError) || e.status !== 409 || onConflict === 'error') throw e;
-    }
-    if (onConflict === 'overwrite') {
-      const dir = await drive.stat(dirId, driveId, { limit: 1 });
-      const existing = await drive.statByPath(`${dir.data.attributes.path}/${name}`, driveId, { limit: 1 });
-      if (existing.data.attributes.type === 'directory') throw new DriveError(`${name} is a folder`, 409);
-      return { doc: await drive.overwrite(existing.data.id, bytes, mime, driveId), action: 'overwritten' };
-    }
-    for (let n = 2; n < 50; n++) {
-      try {
-        return { doc: await drive.upload(dirId, variantName(name, n), bytes, mime, driveId), action: 'created (renamed)' };
-      } catch (e) {
-        if (!(e instanceof DriveError) || e.status !== 409) throw e;
-      }
-    }
-    throw new DriveError(`Could not find a free name for ${name}`, 409);
+    // Trimmed as FileCollection does on creation: the conflict check would otherwise look for another name.
+    name = name.trim();
+    const file = { name, dirId, driveId, contentType: mime };
+    if (onConflict === 'error') return { doc: (await client.collection(FILES_DOCTYPE, { driveId }).createFile(bytes, file)).data, action: 'created' };
+    const conflictStrategy = onConflict === 'overwrite' ? 'erase' : 'rename';
+    const { data: doc } = await (models.file as any).uploadFileWithConflictStrategy(client, bytes, { ...file, conflictStrategy });
+    if (onConflict === 'overwrite') return { doc, action: doc.meta?.rev?.startsWith('1-') ? 'created' : 'overwritten' };
+    return { doc, action: doc.attributes.name === name ? 'created' : 'created (renamed)' };
   };
 
   // ======================= READ =======================
@@ -209,18 +220,20 @@ export function registerTools(
       annotations: READ,
     },
     wrap(async () => {
-      const usage = (await drive.diskUsage()) as Record<string, any>;
+      const diskUsage = buildDiskUsageQuery();
+      const usage: Record<string, any> = (await client.query(diskUsage.definition, diskUsage.options)).data.attributes;
       const used = Number(usage.used ?? 0);
       const quota = usage.quota !== undefined ? Number(usage.quota) : undefined;
+      const size = (value?: unknown) => (value === undefined ? undefined : client.collection(FILES_DOCTYPE).getBeautifulSize({ size: value }, 1));
       return {
-        instance: drive.config.baseUrl,
-        web_app: app,
-        used: humanSize(used),
-        quota: humanSize(quota),
+        instance: config.baseUrl,
+        web_app: webLink(config.baseUrl, { hash: '' }),
+        used: size(used),
+        quota: size(quota),
         used_percent: quota ? Math.round((used / quota) * 1000) / 10 : undefined,
         files_count: usage.files_count,
-        versions_size: humanSize(usage.versions !== undefined ? Number(usage.versions) : undefined),
-        trash_size: humanSize(usage.trash !== undefined ? Number(usage.trash) : undefined),
+        versions_size: size(usage.versions),
+        trash_size: size(usage.trash),
       };
     })
   );
@@ -239,18 +252,18 @@ export function registerTools(
       annotations: READ,
     },
     wrap(async (a: Ref & { limit: number; cursor?: string }) => {
-      const res = await drive.resolve(a, a.drive_id, { limit: a.limit, cursor: a.cursor });
-      const dir = res.data;
-      if (dir.attributes.type !== 'directory') throw new DriveError(`${dir.attributes.name} is a file: use get_item`, 400);
-      const items = (res.included ?? [])
-        .filter((d) => (d.type ?? 'io.cozy.files') === 'io.cozy.files' && d.id !== TRASH_DIR_ID)
+      const res = await resolve(a, a.drive_id, { limit: a.limit, cursor: a.cursor });
+      const dir: CozyDoc = res.data;
+      if (dir.attributes.type !== 'directory') throw new Error(`${dir.attributes.name} is a file: use get_item`);
+      const included: CozyDoc[] = res.included ?? [];
+      const items = included
+        .filter((d) => ['file', 'directory'].includes(d.attributes?.type) && d.id !== TRASH_DIR_ID)
         .map((d) => sum(d, { dirPath: dir.attributes.path, driveId: a.drive_id }));
-      const next = res.links?.next ? new URL(res.links.next, drive.config.baseUrl).searchParams.get('page[cursor]') : null;
       return {
         folder: { id: dir.id, path: dir.attributes.path, name: dir.attributes.name, url: sum(dir).url },
         count: items.length,
         items,
-        next_cursor: next ?? undefined,
+        next_cursor: res.links?.next ? new URL(res.links.next, config.baseUrl).searchParams.get('page[cursor]') : undefined,
       };
     })
   );
@@ -265,20 +278,18 @@ export function registerTools(
     },
     wrap(async (a: Ref) => {
       requireRef(a);
-      const res = await drive.resolve(a, a.drive_id, { limit: 1 });
-      const doc = res.data;
+      const res = await resolve(a, a.drive_id);
+      const doc: CozyDoc = res.data;
       let dirPath: string | undefined;
       if (doc.attributes.type !== 'directory' && doc.attributes.dir_id) {
-        dirPath = a.drive_id
-          ? (await drive.stat(doc.attributes.dir_id, a.drive_id, { limit: 1 }).catch(() => undefined))?.data.attributes.path
-          : (await folderPaths([doc.attributes.dir_id]))[doc.attributes.dir_id];
+        dirPath = (await resolve({ id: doc.attributes.dir_id }, a.drive_id).catch(() => undefined))?.data.attributes.path;
       }
-      const versions = (res.included ?? [])
+      const versions = ((res.included ?? []) as CozyDoc[])
         .filter((d) => d.type === 'io.cozy.files.versions')
-        .map((v) => ({ version_id: v.id.split('/').pop(), updated_at: v.attributes.updated_at, size: humanSize(Number(v.attributes.size)) }));
+        .map((v) => ({ version_id: v.id.split('/').pop(), updated_at: v.attributes.updated_at, size: client.collection(FILES_DOCTYPE).getBeautifulSize(v.attributes, 1) }));
       return {
         ...sum(doc, { dirPath, driveId: a.drive_id }),
-        size_human: humanSize(doc.attributes.size !== undefined ? Number(doc.attributes.size) : undefined),
+        size_human: doc.attributes.size !== undefined ? client.collection(FILES_DOCTYPE).getBeautifulSize(doc.attributes, 1) : undefined,
         rev: doc.meta?.rev,
         created_by_app: doc.attributes.cozyMetadata?.createdByApp,
         old_versions: versions.length ? versions : undefined,
@@ -306,7 +317,7 @@ export function registerTools(
     wrap(async (a: { query: string; type: 'file' | 'directory' | 'any'; class?: string; in_path?: string; limit: number }) => {
       await index.sync();
       const res = index.search(a.query, { type: a.type, class: a.class, inPath: a.in_path, limit: a.limit });
-      return { query: a.query, total: res.total, returned: res.hits.length, items: res.hits.map(hitSummary) };
+      return { query: a.query, total: res.total, returned: res.hits.length, items: res.hits.map((h: Hit) => sum({ id: h.id, attributes: h })) };
     })
   );
 
@@ -314,17 +325,21 @@ export function registerTools(
     'list_recent_files',
     {
       title: 'Recent files',
-      description: 'Most recently modified files, newest first (optionally inside a folder).',
+      description: 'Most recently modified files, newest first (optionally directly inside a folder). Paginated: pass next_cursor back as cursor.',
       inputSchema: {
         limit: z.number().int().min(1).max(200).default(20),
-        in_path: z.string().optional().describe('Only inside this folder (absolute path)'),
+        in_path: z.string().optional().describe('Only files directly inside this folder (absolute path)'),
+        cursor: z.string().optional().describe('next_cursor from a previous call'),
       },
       annotations: READ,
     },
-    wrap(async (a: { limit: number; in_path?: string }) => {
-      await index.sync();
-      const hits = index.recent(a.limit, a.in_path);
-      return { count: hits.length, items: hits.map(hitSummary) };
+    wrap(async (a: { limit: number; in_path?: string; cursor?: string }) => {
+      const dirId = a.in_path ? await resolveDirId({ path: a.in_path }) : undefined;
+      const horizon = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+      const page = { limit: a.limit, bookmark: a.cursor };
+      const query = dirId ? buildRecentFilesInFolderQuery(dirId, horizon, page) : buildRecentFilesQuery(horizon, page);
+      const res = await client.query(query.definition, query.options);
+      return { count: res.data.length, items: res.data.map((d: CozyDoc) => sum(d)), next_cursor: res.next ? res.bookmark : undefined };
     })
   );
 
@@ -332,17 +347,17 @@ export function registerTools(
     'list_favorites',
     {
       title: 'Favourites',
-      description: 'Files and folders marked as favourite.',
-      inputSchema: { limit: z.number().int().min(1).max(200).default(100) },
+      description: 'Files and folders marked as favourite. Paginated: pass next_cursor back as cursor.',
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(100),
+        cursor: z.string().optional().describe('next_cursor from a previous call'),
+      },
       annotations: READ,
     },
-    wrap(async (a: { limit: number }) => {
-      const useIndex = await drive.ensureIndex(['cozyMetadata.favorite']);
-      const res = await drive.find({ selector: { 'cozyMetadata.favorite': true }, use_index: useIndex, limit: a.limit });
-      const items = (await withPaths(res.data.filter((d) => !d.attributes.trashed))).filter(
-        (i) => !i.path?.startsWith('/.cozy_trash')
-      );
-      return { count: items.length, items };
+    wrap(async (a: { limit: number; cursor?: string }) => {
+      const query = buildFavoritesQuery({ limit: a.limit, bookmark: a.cursor });
+      const res = await client.query(query.definition, query.options);
+      return { count: res.data.length, items: res.data.map((d: CozyDoc) => sum(d)), next_cursor: res.next ? res.bookmark : undefined };
     })
   );
 
@@ -358,12 +373,12 @@ export function registerTools(
       annotations: READ,
     },
     wrap(async (a: { limit: number; cursor?: string }) => {
-      const res = await drive.listTrash({ limit: a.limit, cursor: a.cursor });
-      const next = res.links?.next ? new URL(res.links.next, drive.config.baseUrl).searchParams.get('page[cursor]') : null;
+      const res = await resolve({ id: TRASH_DIR_ID }, undefined, { limit: a.limit, cursor: a.cursor });
+      const items: CozyDoc[] = res.included ?? [];
       return {
-        count: res.data.length,
-        items: res.data.map((d) => ({ ...sum(d), restore_path: d.attributes.restore_path })),
-        next_cursor: next ?? undefined,
+        count: items.length,
+        items: items.map((d) => ({ ...sum(d), restore_path: d.attributes.restore_path })),
+        next_cursor: res.links?.next ? new URL(res.links.next, config.baseUrl).searchParams.get('page[cursor]') : undefined,
       };
     })
   );
@@ -383,17 +398,19 @@ export function registerTools(
     },
     wrap(async (a: Ref & { max_chars?: number }) => {
       requireRef(a, 'file');
-      const meta = (await drive.resolve(a, a.drive_id, { limit: 1 })).data;
-      if (meta.attributes.type === 'directory') throw new DriveError('This is a folder: use list_folder', 400);
+      const meta = (await resolve(a, a.drive_id)).data;
+      if (meta.attributes.type === 'directory') throw new Error('This is a folder: use list_folder');
       const name: string = meta.attributes.name;
-      if (!isTextLike(meta.attributes.mime, name)) {
-        throw new DriveError(`${name} (${meta.attributes.mime}) is not a text file: use download_file`, 415);
+      if (!isTextLike(meta.attributes.mime) && !isTextLike(client.collection(FILES_DOCTYPE).getFileTypeFromName(name)) && !/\.(cozy-note|excalidraw)$/i.test(name)) {
+        throw new Error(`${name} (${meta.attributes.mime}) is not a text file: use download_file`);
       }
-      const { bytes } = await drive.download(meta.id, a.drive_id);
+      // fetchFileContentById goes through fetch, which only throws on an error status when asked to.
+      const res = await client.collection(FILES_DOCTYPE, { driveId: a.drive_id }).fetchFileContentById(meta.id, { throwFetchErrors: true });
+      const bytes = new Uint8Array(await res.arrayBuffer());
       const markdown = isTar(bytes) ? markdownFromTar(bytes) : new TextDecoder().decode(bytes);
-      if (markdown === undefined) throw new DriveError(`${name} is a damaged note: its archive has no readable index.md`, 422);
+      if (markdown === undefined) throw new Error(`${name} is a damaged note: its archive has no readable index.md`);
       let content = markdown;
-      const max = a.max_chars ?? drive.config.maxTextChars;
+      const max = a.max_chars ?? config.maxTextChars;
       const truncated = content.length > max;
       if (truncated) content = content.slice(0, max);
       return { id: meta.id, name, mime: meta.attributes.mime, chars: content.length, truncated, content };
@@ -418,23 +435,28 @@ export function registerTools(
     },
     wrap(async (a: Ref & { save_to?: string }) => {
       requireRef(a, 'file');
-      const meta = (await drive.resolve(a, a.drive_id, { limit: 1 })).data;
-      if (meta.attributes.type === 'directory') throw new DriveError('Downloading a whole folder is not supported', 400);
+      const meta = (await resolve(a, a.drive_id)).data;
+      if (meta.attributes.type === 'directory') throw new Error('Downloading a whole folder is not supported');
       const name: string = meta.attributes.name;
       let target: string;
       if (a.save_to) {
-        if (!isAbsolute(a.save_to)) throw new DriveError('save_to must be absolute', 400);
+        if (!isAbsolute(a.save_to)) throw new Error('save_to must be absolute');
         const isDir = existsSync(a.save_to) && (await fsStat(a.save_to)).isDirectory();
         target = isDir ? join(a.save_to, name) : a.save_to;
       } else {
-        target = join(drive.config.downloadDir, name);
-        for (let n = 2; existsSync(target); n++) target = join(drive.config.downloadDir, variantName(name, n));
+        let free = name;
+        while (existsSync(join(config.downloadDir, free))) {
+          const { filename, extension } = (models.file as any).splitFilename({ name: free, type: 'file' });
+          free = (models.file as any).generateNewFileNameOnConflict(filename) + extension;
+        }
+        target = join(config.downloadDir, free);
       }
-      await assertInside(drive.config.downloadDir, target, 'TWAKE_DRIVE_DOWNLOAD_DIR');
+      await assertInside(config.downloadDir, target, 'TWAKE_DRIVE_DOWNLOAD_DIR');
       await mkdir(dirname(target), { recursive: true });
-      const { bytes } = await drive.download(meta.id, a.drive_id);
+      const res = await client.collection(FILES_DOCTYPE, { driveId: a.drive_id }).fetchFileContentById(meta.id, { throwFetchErrors: true });
+      const bytes = new Uint8Array(await res.arrayBuffer());
       await writeFile(target, bytes, { flag: 'wx' }).catch((e: NodeJS.ErrnoException) => {
-        throw e.code === 'EEXIST' ? new DriveError(`${target} already exists`, 409) : e;
+        throw e.code === 'EEXIST' ? new Error(`${target} already exists`) : e;
       });
       return { id: meta.id, name, local_path: resolvePath(target), size: humanSize(bytes.length), mime: meta.attributes.mime };
     })
@@ -449,7 +471,7 @@ export function registerTools(
       annotations: READ,
     },
     wrap(async () => {
-      const drives = await drive.sharedDrives();
+      const drives: CozyDoc[] = (await client.collection('io.cozy.sharings').fetchSharedDrives()).data;
       return drives.map((d) => ({
         drive_id: d.id,
         name: d.attributes.description ?? d.attributes.rules?.[0]?.title,
@@ -469,7 +491,7 @@ export function registerTools(
       annotations: READ,
     },
     wrap(async () => {
-      const list = await drive.sharings();
+      const list: CozyDoc[] = (await client.collection('io.cozy.sharings').findByDoctype(FILES_DOCTYPE)).data;
       return list.map((s) => ({
         sharing_id: s.id,
         description: s.attributes.description,
@@ -491,8 +513,8 @@ export function registerTools(
       annotations: READ,
     },
     wrap(async () => {
-      const res = await drive.listShareLinks();
-      return res.data.map((p) => linkSummary(p, app));
+      const links: CozyDoc[] = (await client.collection('io.cozy.permissions').fetchAllLinks({ _type: FILES_DOCTYPE })).data;
+      return links.map((p) => linkSummary(p, config.baseUrl));
     })
   );
 
@@ -513,37 +535,37 @@ export function registerTools(
     },
     wrap(async (a: { name?: string; path?: string; parents: boolean; parent_id?: string; parent_path?: string; drive_id?: string }) => {
       if (a.path) {
-        const parts = normalizePath(a.path).split('/').filter(Boolean);
-        if (!parts.length) throw new DriveError('path must not be the root', 400);
-        await approver.confirm({ action: 'create_folder', details: [['drive', await driveLabel(a.drive_id)], ['folder', normalizePath(a.path)]] });
-        let parentId = await drive.rootId(a.drive_id);
-        let current = '';
-        let last: CozyDoc | undefined;
-        for (const [i, part] of parts.entries()) {
-          current += `/${part}`;
-          try {
-            last = (await drive.statByPath(current, a.drive_id, { limit: 1 })).data;
-            if (i === parts.length - 1) return { already_existed: true, ...sum(last) };
-          } catch (e) {
-            if (!(e instanceof DriveError) || e.status !== 404) throw e;
-            if (i < parts.length - 1 && !a.parents) throw new DriveError(`${current} does not exist (use parents=true)`, 404);
-            last = await drive.mkdir(parentId, part, a.drive_id);
-          }
-          parentId = last.id;
-        }
-        return { created: true, ...sum(last!) };
+        const path = posix.resolve('/', a.path.trim());
+        if (path === '/') throw new Error('path must not be the root');
+        await approver.confirm({ action: 'create_folder', details: [['drive', await driveLabel(a.drive_id)], ['folder', path]] });
+        const missing = (e: { status?: number }) => {
+          if (e.status !== 404) throw e;
+        };
+        const existing = await statByPath(path, a.drive_id).catch(missing);
+        if (existing) return { already_existed: true, ...sum(existing.data) };
+        // createDirectoryByPath starts at the instance root, which a shared drive member cannot read.
+        const dirIdOf = async (dir: string): Promise<string> => {
+          if (dir === '/') return rootId(a.drive_id);
+          const found = await statByPath(dir, a.drive_id).catch(missing);
+          if (found) return found.data.id;
+          if (!a.parents) throw new Error(`${dir} does not exist (use parents=true)`);
+          return (await createDir(dir)).data.id;
+        };
+        const createDir = async (dir: string) =>
+          client.collection(FILES_DOCTYPE, { driveId: a.drive_id }).create({ type: 'directory', name: posix.basename(dir), dirId: await dirIdOf(posix.dirname(dir)) });
+        return { created: true, ...sum((await createDir(path)).data) };
       }
-      if (!a.name) throw new DriveError('Give either path, or name with parent_id/parent_path', 400);
-      const parentId = await drive.resolveDirId({ id: a.parent_id, path: a.parent_path }, a.drive_id);
+      if (!a.name) throw new Error('Give either path, or name with parent_id/parent_path');
+      const parentId = await resolveDirId({ id: a.parent_id, path: a.parent_path }, a.drive_id);
       await approver.confirm({ action: 'create_folder', details: [['drive', await driveLabel(a.drive_id)], ['destination', await folderLabel(parentId, a.drive_id)], ['name', a.name]] });
-      return { created: true, ...sum(await drive.mkdir(parentId, a.name, a.drive_id)) };
+      return { created: true, ...sum((await client.collection(FILES_DOCTYPE, { driveId: a.drive_id }).create({ type: 'directory', name: a.name, dirId: parentId })).data) };
     })
   );
 
   const conflict = z
     .enum(['error', 'rename', 'overwrite'])
     .default('error')
-    .describe('If a file with this name exists: error (default), rename ("name (2).ext") or overwrite (new version)');
+    .describe('If a file with this name exists: error (default), rename ("name (1).ext") or overwrite (new version)');
 
   server.registerTool(
     'upload_file',
@@ -564,9 +586,9 @@ export function registerTools(
     },
     wrap(async (a: any) => {
       const name: string | undefined = a.name ?? (a.local_path ? basename(a.local_path) : undefined);
-      if (!name) throw new DriveError('name is required when uploading content', 400);
-      const bytes = await loadBytes(a, drive.config.uploadDir);
-      const dirId = await drive.resolveDirId({ id: a.parent_id, path: a.parent_path }, a.drive_id);
+      if (!name) throw new Error('name is required when uploading content');
+      const bytes = await loadBytes(a, config.uploadDir);
+      const dirId = await resolveDirId({ id: a.parent_id, path: a.parent_path }, a.drive_id);
       await approver.confirm({
         action: 'upload_file',
         details: [
@@ -578,7 +600,7 @@ export function registerTools(
           ['if_exists', conflictLabel(a.on_conflict)],
         ],
       });
-      const { doc, action } = await uploadWithPolicy(dirId, name, bytes, a.mime ?? guessMime(name), a.on_conflict, a.drive_id);
+      const { doc, action } = await uploadWithPolicy(dirId, name, bytes, a.mime, a.on_conflict, a.drive_id);
       return { action, ...sum(doc, { driveId: a.drive_id }), size_human: humanSize(bytes.length) };
     })
   );
@@ -598,9 +620,9 @@ export function registerTools(
     },
     wrap(async (a: any) => {
       requireRef(a, 'file');
-      const meta = (await drive.resolve(a, a.drive_id, { limit: 1 })).data;
-      if (meta.attributes.type === 'directory') throw new DriveError('This is a folder', 400);
-      const bytes = await loadBytes(a, drive.config.uploadDir);
+      const meta = (await resolve(a, a.drive_id)).data;
+      if (meta.attributes.type === 'directory') throw new Error('This is a folder');
+      const bytes = await loadBytes(a, config.uploadDir);
       await approver.confirm({
         action: 'update_file_content',
         details: [
@@ -610,7 +632,8 @@ export function registerTools(
           ['content', preview(a)],
         ],
       });
-      const doc = await drive.overwrite(meta.id, bytes, meta.attributes.mime ?? guessMime(meta.attributes.name), a.drive_id, meta.meta?.rev);
+      const file = { fileId: meta.id, name: meta.attributes.name, contentType: meta.attributes.mime };
+      const { data: doc } = await client.collection(FILES_DOCTYPE, { driveId: a.drive_id }).updateFile(bytes, file, { ifMatch: meta.meta?.rev, sanitizeName: false });
       return { updated: true, ...sum(doc, { driveId: a.drive_id }), size_human: humanSize(bytes.length) };
     })
   );
@@ -635,12 +658,12 @@ export function registerTools(
       const ext = tpl.split('.')[1];
       const name = withExtension(a.name, ext);
       const bytes = new Uint8Array(await readFile(join(TEMPLATES_DIR, tpl)));
-      const dirId = await drive.resolveDirId({ id: a.parent_id, path: a.parent_path }, a.drive_id);
+      const dirId = await resolveDirId({ id: a.parent_id, path: a.parent_path }, a.drive_id);
       await approver.confirm({
         action: 'create_document',
         details: [['drive', await driveLabel(a.drive_id)], ['destination', await folderLabel(dirId, a.drive_id)], ['name', name], ['if_exists', conflictLabel(a.on_conflict)]],
       });
-      const { doc, action } = await uploadWithPolicy(dirId, name, bytes, guessMime(name), a.on_conflict, a.drive_id);
+      const { doc, action } = await uploadWithPolicy(dirId, name, bytes, undefined, a.on_conflict, a.drive_id);
       return { action, ...sum(doc, { driveId: a.drive_id }) };
     })
   );
@@ -661,7 +684,7 @@ export function registerTools(
       annotations: CREATE,
     },
     wrap(async (a: any) => {
-      const dirId = await drive.resolveDirId({ id: a.parent_id, path: a.parent_path }, a.drive_id);
+      const dirId = await resolveDirId({ id: a.parent_id, path: a.parent_path }, a.drive_id);
       await approver.confirm({
         action: 'create_note',
         details: [
@@ -673,7 +696,11 @@ export function registerTools(
         ],
       });
       if (!a.markdown) {
-        const doc = await drive.createEmptyNote(a.title, dirId, a.drive_id);
+        // NotesCollection.create() always sends an empty title.
+        const notes = client.collection('io.cozy.notes', { driveId: a.drive_id });
+        const { data: doc } = await stack.fetchJSON('POST', `${notes.prefix}/notes`, {
+          data: { type: 'io.cozy.notes.documents', attributes: { title: a.title, dir_id: dirId, schema: notes.getDefaultSchema() } },
+        });
         return { action: 'created', ...sum(doc, { driveId: a.drive_id }) };
       }
       // A .cozy-note upload is turned back into a ProseMirror note by the stack (docs/notes.md).
@@ -704,12 +731,13 @@ export function registerTools(
       annotations: CREATE,
     },
     wrap(async (a: { name: string; url: string; parent_id?: string; parent_path?: string }) => {
-      const dirId = await drive.resolveDirId({ id: a.parent_id, path: a.parent_path });
+      const dirId = await resolveDirId({ id: a.parent_id, path: a.parent_path });
       await approver.confirm({
         action: 'create_shortcut',
         details: [['drive', L('my_drive')], ['destination', await folderLabel(dirId)], ['name', withExtension(a.name, 'url')], ['url', a.url]],
       });
-      return { action: 'created', ...sum(await drive.createShortcut(withExtension(a.name, 'url'), a.url, dirId)) };
+      const shortcut = { _type: 'io.cozy.files.shortcuts', name: withExtension(a.name, 'url'), url: a.url, dir_id: dirId };
+      return { action: 'created', ...sum((await client.save(shortcut)).data) };
     })
   );
 
@@ -724,7 +752,7 @@ export function registerTools(
     wrap(async (a: any) => {
       const name = withExtension(a.name, 'excalidraw');
       const scene = JSON.stringify({ type: 'excalidraw', version: 2, elements: [], appState: {}, files: {} });
-      const dirId = await drive.resolveDirId({ id: a.parent_id, path: a.parent_path }, a.drive_id);
+      const dirId = await resolveDirId({ id: a.parent_id, path: a.parent_path }, a.drive_id);
       await approver.confirm({
         action: 'create_drawing',
         details: [['drive', await driveLabel(a.drive_id)], ['destination', await folderLabel(dirId, a.drive_id)], ['name', name], ['if_exists', conflictLabel(a.on_conflict)]],
@@ -753,12 +781,14 @@ export function registerTools(
     },
     wrap(async (a: Ref & { new_name: string }) => {
       requireRef(a);
-      const meta = (await drive.resolve(a, a.drive_id, { limit: 1 })).data;
+      const meta = (await resolve(a, a.drive_id)).data;
       await approver.confirm({
         action: 'rename_item',
         details: [['drive', await driveLabel(a.drive_id)], ['item', await itemLabel(meta, a.drive_id)], ['change', `${meta.attributes.name} → ${a.new_name}`]],
       });
-      return { renamed_from: meta.attributes.name, ...sum(await drive.patch(meta.id, { name: a.new_name }, a.drive_id)) };
+      // An update through client.save() always targets /files, never a shared drive, and trims names: same for the three tools below.
+      const { data: doc } = await client.collection(FILES_DOCTYPE, { driveId: a.drive_id }).updateAttributes(meta.id, { name: a.new_name }, { sanitizeName: false });
+      return { renamed_from: meta.attributes.name, ...sum(doc) };
     })
   );
 
@@ -776,14 +806,15 @@ export function registerTools(
     },
     wrap(async (a: Ref & { destination_id?: string; destination_path?: string }) => {
       requireRef(a);
-      if (!a.destination_id && !a.destination_path) throw new DriveError('Give destination_id or destination_path', 400);
-      const meta = (await drive.resolve(a, a.drive_id, { limit: 1 })).data;
-      const dirId = await drive.resolveDirId({ id: a.destination_id, path: a.destination_path }, a.drive_id);
+      if (!a.destination_id && !a.destination_path) throw new Error('Give destination_id or destination_path');
+      const meta = (await resolve(a, a.drive_id)).data;
+      const dirId = await resolveDirId({ id: a.destination_id, path: a.destination_path }, a.drive_id);
       await approver.confirm({
         action: 'move_item',
         details: [['drive', await driveLabel(a.drive_id)], ['item', await itemLabel(meta, a.drive_id)], ['destination', await folderLabel(dirId, a.drive_id)]],
       });
-      return { moved: true, ...sum(await drive.patch(meta.id, { dir_id: dirId }, a.drive_id)) };
+      const { data: doc } = await client.collection(FILES_DOCTYPE, { driveId: a.drive_id }).updateAttributes(meta.id, { dir_id: dirId });
+      return { moved: true, ...sum(doc) };
     })
   );
 
@@ -802,11 +833,11 @@ export function registerTools(
     },
     wrap(async (a: Ref & { destination_id?: string; destination_path?: string; new_name?: string }) => {
       requireRef(a, 'file');
-      const meta = (await drive.resolve(a, a.drive_id, { limit: 1 })).data;
-      if (meta.attributes.type === 'directory') throw new DriveError('Copying a folder is not supported by the API', 400);
+      const meta = (await resolve(a, a.drive_id)).data;
+      if (meta.attributes.type === 'directory') throw new Error('Copying a folder is not supported by the API');
       const dirId =
         a.destination_id || a.destination_path
-          ? await drive.resolveDirId({ id: a.destination_id, path: a.destination_path }, a.drive_id)
+          ? await resolveDirId({ id: a.destination_id, path: a.destination_path }, a.drive_id)
           : undefined;
       await approver.confirm({
         action: 'copy_file',
@@ -817,7 +848,8 @@ export function registerTools(
           ['name', a.new_name],
         ],
       });
-      return { copied: true, ...sum(await drive.copy(meta.id, { name: a.new_name, dirId }, a.drive_id)) };
+      const { data: copy } = await client.collection(FILES_DOCTYPE, { driveId: a.drive_id }).copy(meta.id, a.new_name, dirId, { sanitizeName: false });
+      return { copied: true, ...sum(copy) };
     })
   );
 
@@ -831,13 +863,13 @@ export function registerTools(
     },
     wrap(async (a: Ref & { favorite: boolean }) => {
       requireRef(a);
-      const meta = (await drive.resolve(a, a.drive_id, { limit: 1 })).data;
+      const meta = (await resolve(a, a.drive_id)).data;
       await approver.confirm({
         action: 'set_favorite',
         details: [['drive', await driveLabel(a.drive_id)], ['item', await itemLabel(meta, a.drive_id)], ['change', L(a.favorite ? 'on' : 'off')]],
       });
       const cozyMetadata = { ...(meta.attributes.cozyMetadata ?? {}), favorite: a.favorite };
-      return sum(await drive.patch(meta.id, { cozyMetadata }, a.drive_id));
+      return sum((await client.collection(FILES_DOCTYPE, { driveId: a.drive_id }).updateAttributes(meta.id, { cozyMetadata })).data);
     })
   );
 
@@ -851,7 +883,7 @@ export function registerTools(
     },
     wrap(async (a: Ref & { tags: string[] }) => {
       requireRef(a);
-      const meta = (await drive.resolve(a, a.drive_id, { limit: 1 })).data;
+      const meta = (await resolve(a, a.drive_id)).data;
       const before: string[] = meta.attributes.tags ?? [];
       await approver.confirm({
         action: 'set_tags',
@@ -861,7 +893,7 @@ export function registerTools(
           ['tags', `${before.length ? before.join(', ') : L('none')} → ${a.tags.length ? a.tags.join(', ') : L('none')}`],
         ],
       });
-      return sum(await drive.patch(meta.id, { tags: a.tags }, a.drive_id));
+      return sum((await client.collection(FILES_DOCTYPE, { driveId: a.drive_id }).updateAttributes(meta.id, { tags: a.tags })).data);
     })
   );
 
@@ -875,12 +907,12 @@ export function registerTools(
     },
     wrap(async (a: Ref) => {
       requireRef(a);
-      const meta = (await drive.resolve(a, a.drive_id, { limit: 1 })).data;
+      const meta = (await resolve(a, a.drive_id)).data;
       await approver.confirm({
         action: 'trash_item',
         details: [['drive', await driveLabel(a.drive_id)], ['item', `${await itemLabel(meta, a.drive_id)} · ${L('reversible')}`]],
       });
-      await drive.trash(meta.id, a.drive_id);
+      await client.collection(FILES_DOCTYPE, { driveId: a.drive_id }).destroy({ _id: meta.id });
       return { trashed: true, id: meta.id, name: meta.attributes.name };
     })
   );
@@ -894,13 +926,13 @@ export function registerTools(
       annotations: MODIFY,
     },
     wrap(async (a: { id: string }) => {
-      const meta = (await drive.stat(a.id, undefined, { limit: 1 })).data;
+      const meta = (await resolve({ id: a.id })).data;
       const back = meta.attributes.restore_path;
       await approver.confirm({
         action: 'restore_from_trash',
         details: [['item', meta.attributes.name], ['destination', back]],
       });
-      return { restored: true, ...sum(await drive.restore(a.id)) };
+      return { restored: true, ...sum((await client.collection(FILES_DOCTYPE).restore(a.id)).data) };
     })
   );
 
@@ -913,8 +945,8 @@ export function registerTools(
       annotations: MODIFY,
     },
     wrap(async (a: { id: string; version_id: string }) => {
-      const res = await drive.stat(a.id, undefined, { limit: 1 });
-      const v = (res.included ?? []).find((d) => d.type === 'io.cozy.files.versions' && d.id.split('/').pop() === a.version_id);
+      const res = await resolve({ id: a.id });
+      const v = ((res.included ?? []) as CozyDoc[]).find((d) => d.type === 'io.cozy.files.versions' && d.id.split('/').pop() === a.version_id);
       await approver.confirm({
         action: 'revert_version',
         details: [
@@ -922,7 +954,9 @@ export function registerTools(
           ['version', v ? `${v.attributes.updated_at} (${humanSize(Number(v.attributes.size))})` : a.version_id],
         ],
       });
-      return { reverted: true, ...sum(await drive.revert(a.id, a.version_id)) };
+      // cozy-client has no call for this route.
+      const path = `${client.collection(FILES_DOCTYPE).prefix}/revert/${encodeURIComponent(a.id)}/${encodeURIComponent(a.version_id)}`;
+      return { reverted: true, ...sum((await stack.fetchJSON('POST', path)).data) };
     })
   );
 
@@ -945,8 +979,8 @@ export function registerTools(
     },
     wrap(async (a: Ref & { write: boolean; password?: string; expires_at?: string }) => {
       requireRef(a);
-      if (a.drive_id) throw new DriveError('Public links on shared-drive items are not supported by this tool', 400);
-      const meta = (await drive.resolve(a, undefined, { limit: 1 })).data;
+      if (a.drive_id) throw new Error('Public links on shared-drive items are not supported by this tool');
+      const meta = (await resolve(a, undefined)).data;
       const expiresAt = a.expires_at ? new Date(a.expires_at).toISOString() : undefined;
       await approver.confirm({
         action: 'create_share_link',
@@ -957,8 +991,14 @@ export function registerTools(
           ['expires', expiresAt ?? L('never')],
         ],
       });
-      const perm = await drive.createShareLink(meta.id, { write: a.write, password: a.password, expiresAt });
-      return { item: sum(meta), link: linkSummary(perm, app) };
+      const { data: perm } = await client.save({
+        _type: 'io.cozy.permissions',
+        codes: 'email',
+        permissions: { files: { type: FILES_DOCTYPE, verbs: a.write ? ['GET', 'POST', 'PUT', 'PATCH'] : ['GET'], values: [meta.id] } },
+        ...(a.password ? { password: a.password } : {}),
+        ...(expiresAt ? { expires_at: expiresAt } : {}),
+      });
+      return { item: sum(meta), link: linkSummary(perm, config.baseUrl) };
     })
   );
 
@@ -972,15 +1012,16 @@ export function registerTools(
     },
     wrap(async (a: Ref) => {
       requireRef(a);
-      const meta = (await drive.resolve(a, undefined, { limit: 1 })).data;
-      const res = await drive.listShareLinks();
-      const matching = res.data.filter((p) =>
+      const meta = (await resolve(a, undefined)).data;
+      const permissions = client.collection('io.cozy.permissions');
+      const links: CozyDoc[] = (await permissions.fetchAllLinks({ _type: FILES_DOCTYPE })).data;
+      const matching = links.filter((p) =>
         Object.values(p.attributes.permissions ?? {}).some((r: any) => (r.values ?? []).includes(meta.id))
       );
       if (matching.length) {
         await approver.confirm({ action: 'revoke_share_link', details: [['item', await itemLabel(meta)], ['links', String(matching.length)]] });
       }
-      for (const p of matching) await drive.deletePermission(p.id);
+      for (const p of matching) await permissions.destroy(p);
       return { item: meta.attributes.name, revoked_links: matching.length };
     })
   );
@@ -996,17 +1037,17 @@ export function registerTools(
       annotations: DESTRUCTIVE,
     },
     wrap(async (a: { id: string }) => {
-      const meta = (await drive.stat(a.id, undefined, { limit: 1 })).data;
+      const meta: CozyDoc = (await resolve({ id: a.id })).data;
       const inTrash =
         meta.attributes.trashed === true ||
         meta.attributes.dir_id === TRASH_DIR_ID ||
         String(meta.attributes.path ?? '').startsWith('/.cozy_trash/');
-      if (!inTrash) throw new DriveError('Only trashed items can be destroyed: use trash_item first', 400);
+      if (!inTrash) throw new Error('Only trashed items can be destroyed: use trash_item first');
       await approver.confirm({
         action: 'delete_permanently',
         details: [['item', `${meta.attributes.name}${meta.attributes.size !== undefined ? ` (${humanSize(Number(meta.attributes.size))})` : ''}`], ['folder', meta.attributes.restore_path]],
       });
-      await drive.destroy(a.id);
+      await client.collection(FILES_DOCTYPE).deleteFilePermanently(a.id);
       return { destroyed: true, id: a.id, name: meta.attributes.name };
     })
   );
@@ -1020,27 +1061,27 @@ export function registerTools(
       annotations: DESTRUCTIVE,
     },
     wrap(async () => {
-      const trash = await drive.listTrash({ limit: 100 }).catch(() => undefined);
-      const items = trash?.data ?? [];
+      const trash = await resolve({ id: TRASH_DIR_ID }, undefined, { limit: 100 }).catch(() => undefined);
+      const items: CozyDoc[] = trash?.included ?? [];
       const names = items.slice(0, 10).map((d) => d.attributes.name);
       await approver.confirm({
         action: 'empty_trash',
         details: [['contents', trash ? `${items.length}${trash.links?.next ? '+' : ''} ${L('items')}${names.length ? `: ${names.join(', ')}${items.length > 10 ? ', …' : ''}` : ''}` : undefined]],
       });
-      await drive.emptyTrash();
+      await client.collection(FILES_DOCTYPE).emptyTrash();
       return { emptied: true };
     })
   );
 }
 
-export function linkSummary(p: CozyDoc, appUrl: string) {
+export function linkSummary(p: CozyDoc, baseUrl: string) {
   const a = p.attributes ?? {};
   const code = a.shortcodes?.email ?? a.shortcodes?.code ?? a.codes?.email ?? a.codes?.code;
   const rules = Object.values(a.permissions ?? {}) as Array<{ verbs?: string[]; values?: string[] }>;
   const verbs = rules.flatMap((r) => r.verbs ?? []);
   return {
     link_id: p.id,
-    url: code ? `${appUrl}/public?sharecode=${encodeURIComponent(code)}` : undefined,
+    url: code ? webLink(baseUrl, { pathname: '/public', searchParams: [['sharecode', code]] }) : undefined,
     file_ids: rules.flatMap((r) => r.values ?? []),
     rights: verbs.some((v) => v !== 'GET') ? 'edit' : 'read-only',
     password: a.password ? true : undefined,
