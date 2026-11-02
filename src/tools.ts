@@ -457,7 +457,8 @@ export function registerTools(
       await mkdir(dirname(target), { recursive: true });
       const res = await client.collection(FILES_DOCTYPE, { driveId: a.drive_id }).fetchFileContentById(meta.id, { throwFetchErrors: true });
       const bytes = new Uint8Array(await res.arrayBuffer());
-      await writeFile(target, bytes, { flag: 'wx' }).catch((e: NodeJS.ErrnoException) => {
+      // Private to the user, like the mail and chat downloads: an attachment may be confidential
+      await writeFile(target, bytes, { flag: 'wx', mode: 0o600 }).catch((e: NodeJS.ErrnoException) => {
         throw e.code === 'EEXIST' ? new Error(`${target} already exists`) : e;
       });
       return { id: meta.id, name, local_path: resolvePath(target), size: humanSize(bytes.length), mime: meta.attributes.mime };

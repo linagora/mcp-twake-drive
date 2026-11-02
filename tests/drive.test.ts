@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
@@ -276,6 +276,13 @@ describe('MCP tools (in-memory)', () => {
       const named = join(downloadDir, '..dir', 'b.txt');
       expect((await call('download_file', { id: 'f', save_to: named })).error).toBe(false);
       expect(readFileSync(named, 'utf8')).toBe('remote');
+    });
+
+    it('keeps a downloaded file private to the user (mode 600)', async () => {
+      const { call } = await connectFile();
+      const named = join(downloadDir, 'private.txt');
+      expect((await call('download_file', { id: 'f', save_to: named })).error).toBe(false);
+      expect(statSync(named).mode & 0o777).toBe(0o600);
     });
 
     it('works when the download folder is itself a symlink', async () => {
