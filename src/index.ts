@@ -37,9 +37,6 @@ async function main(): Promise<void> {
 
   const host = new URL(config.baseUrl).host;
   const index = new FileIndex(client, config.baseUrl, join(config.cacheDir, `${host}.json`));
-  // Warm the search index in the background: the first full sync of a large
-  // drive takes tens of seconds, later ones only pull the new changes.
-  index.sync().catch((e) => process.stderr.write(`mcp-twake-drive: index sync failed: ${(e as Error).message}\n`));
 
   const server = new McpServer({ name: 'mcp-twake-drive', version: VERSION });
   registerTools(server, client, config, index);
