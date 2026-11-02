@@ -6,7 +6,7 @@
  * web and mobile apps search a locally replicated copy. We do the same with
  * the light `/files/_changes` feed (names, folders, types, sizes, dates only),
  * persisted to a private cache file and refreshed incrementally from the last
- * sequence before every search.
+ * sequence before every search. Nothing is fetched until the first search.
  */
 import { mkdir, readFile, rename, writeFile, chmod } from 'node:fs/promises';
 import { dirname } from 'node:path';

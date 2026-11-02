@@ -304,7 +304,7 @@ export function registerTools(
       description:
         'Search the whole drive by name: case- and accent-insensitive, every word must appear in the name. ' +
         'Optional filters: type, class (pdf, image, text, spreadsheet, slide, audio, video...) and in_path (folder scope). ' +
-        'Uses a local index refreshed from the server before each search; trashed items are excluded. Shared drives not included.',
+        'Uses a local index built at the first search and refreshed from the server before each search; trashed items are excluded. Shared drives not included.',
       inputSchema: {
         query: z.string().min(1).describe('Words of the name to look for'),
         type: z.enum(['file', 'directory', 'any']).default('any'),
