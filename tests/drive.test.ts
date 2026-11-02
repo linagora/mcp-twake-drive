@@ -140,13 +140,24 @@ describe('helpers', () => {
     );
     expect(l).toMatchObject({ url: 'https://alice-drive.twake.example.com/public?sharecode=ABC#/', rights: 'read-only', file_ids: ['f1'] });
   });
+  it.each([
+    [['GET'], 'read-only'],
+    [['GET', 'HEAD'], 'read-only'],
+    [[], 'edit'],
+    [undefined, 'edit'],
+    [['ALL'], 'edit'],
+    [['GET', 'PATCH'], 'edit'],
+  ])('reads the rights of verbs %j as %s', (verbs, rights) => {
+    const l = linkSummary({ id: 'p1', attributes: { permissions: { files: { verbs, values: ['f1'] } } } }, config.baseUrl);
+    expect(l.rights).toBe(rights);
+  });
 });
 
 describe('MCP tools (in-memory)', () => {
-  async function connect(handler: Handler, driveConfig = config) {
+  async function connect(handler: Handler, driveConfig = config, source = tokens()) {
     const { calls } = fakeFetch(handler);
     const server = new McpServer({ name: 't', version: '0' });
-    const cozy = createCozyClient(driveConfig.baseUrl, tokens());
+    const cozy = createCozyClient(driveConfig.baseUrl, source);
     registerTools(server, cozy, driveConfig, new FileIndex(cozy, driveConfig.baseUrl, `/tmp/twake-drive-test-${process.pid}-${Math.random()}.json`));
     const [a, b] = InMemoryTransport.createLinkedPair();
     const prompts: string[] = [];
@@ -568,6 +579,63 @@ describe('MCP tools (in-memory)', () => {
     const r = await call('get_item', { id: 'f' });
     expect(r.text).toContain('HTTP 400 (Invalid JWT token)');
     expect(r.text).toMatch(/How to fix: The Twake Drive token was refused/);
+  });
+
+  it('keeps the message of a token command that fails on renewal', async () => {
+    const source = tokens();
+    source.getToken.mockResolvedValueOnce('old').mockRejectedValueOnce(new Error('token command failed: broker down'));
+    const { call } = await connect(() => json(400, { error: 'Invalid JWT token' }), config, source);
+    const r = await call('get_item', { id: 'f' });
+    expect(r.error).toBe(true);
+    expect(r.text).toContain('HTTP 400 (Invalid JWT token)');
+    expect(r.text).toContain('token command failed: broker down');
+  });
+
+  describe('revoke_share_link', () => {
+    const link = (id: string, rules: Record<string, unknown>) => ({ type: 'io.cozy.permissions', id, attributes: { permissions: rules } });
+    const revoke = async (links: unknown[]) => {
+      const { call, calls } = await connect((u, init) => {
+        if (init.method === 'DELETE') return new Response(null, { status: 204 });
+        if (u.pathname.includes('shared-by-link')) return json(200, { data: links });
+        return json(200, { data: { id: 'f', attributes: { type: 'file', name: 'a.txt' } } });
+      });
+      const r = await call('revoke_share_link', { id: 'f' });
+      return { result: JSON.parse(r.text), deleted: calls.filter((c) => c.method === 'DELETE').map((c) => c.url.pathname) };
+    };
+
+    it('revokes the links of the item under any rule name, and only those', async () => {
+      const { result, deleted } = await revoke([
+        link('mine', { files: { values: ['f'] } }),
+        link('named', { images: { values: ['g', 'f'] } }),
+        link('other', { rule0: { values: ['g'] } }),
+        link('no-values', { files: { verbs: ['GET'] } }),
+      ]);
+      expect(result).toEqual({ item: 'a.txt', revoked_links: 2 });
+      expect(deleted).toEqual(['/permissions/mine', '/permissions/named']);
+    });
+
+    it('says when the item has no link', async () => {
+      const { result, deleted } = await revoke([link('other', { files: { values: ['g'] } })]);
+      expect(result).toEqual({ item: 'a.txt', revoked_links: 0 });
+      expect(deleted).toEqual([]);
+    });
+  });
+
+  it('creates a folder by path in a shared drive without reading the instance root', async () => {
+    const { call, calls } = await connect((u, init) => {
+      if (init.method === 'POST') {
+        return json(201, { data: { id: `new-${u.searchParams.get('Name')}`, attributes: { type: 'directory', name: u.searchParams.get('Name'), path: '/x' } } });
+      }
+      if (u.searchParams.get('Path') === '/Drive') return json(200, { data: { id: 'drive-dir', attributes: { type: 'directory', path: '/Drive' } } });
+      return json(404, { errors: [{ status: '404', title: 'Not Found' }] });
+    });
+    const r = await call('create_folder', { path: '/Drive/a/b', parents: true, drive_id: 'drv' });
+    expect(r.error).toBe(false);
+    expect(calls.some((c) => c.url.pathname.includes('root-dir'))).toBe(false);
+    expect(calls.filter((c) => c.method === 'POST').map((c) => [c.url.pathname, c.url.searchParams.get('Name')])).toEqual([
+      ['/sharings/drives/drv/drive-dir', 'a'],
+      ['/sharings/drives/drv/new-a', 'b'],
+    ]);
   });
 
   it('trims a name before looking for a conflict', async () => {

@@ -29,6 +29,9 @@ export interface CozyDoc {
 
 /** fetchJSON calls refreshToken() on an expired or invalid token, and retries once. */
 class TokenStackClient extends CozyStackClient {
+  // fetchJSON drops a refresh error and rejects with the stack's answer.
+  refreshFailure?: Error;
+
   constructor(
     options: { uri: string },
     private readonly tokens: TokenSource
@@ -38,12 +41,16 @@ class TokenStackClient extends CozyStackClient {
 
   async loadToken(): Promise<void> {
     (this as any).setToken(await this.tokens.getToken());
+    this.refreshFailure = undefined;
   }
 
   // The stack client's own refresh reads a web page: here the token comes from the external source.
   async refreshToken(): Promise<void> {
     this.tokens.invalidate();
-    await this.loadToken();
+    await this.loadToken().catch((e) => {
+      this.refreshFailure = e;
+      throw e;
+    });
     (this as any).onTokenRefresh((this as any).token);
   }
 }
