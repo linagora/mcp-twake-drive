@@ -4,6 +4,8 @@ All notable changes to mcp-twake-drive are documented here. The format follows [
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
 ### Changed
 - `download_file` writes inside `TWAKE_DRIVE_DOWNLOAD_DIR` only and never replaces an existing file: `save_to` outside that folder or on an existing file is refused.
 - `upload_file` and `update_file_content` read `local_path` from `TWAKE_DRIVE_UPLOAD_DIR` only, which defaults to `TWAKE_DRIVE_DOWNLOAD_DIR`. To upload a local file from elsewhere, copy it there or set this variable.
