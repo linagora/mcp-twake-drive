@@ -18,6 +18,9 @@ All notable changes to mcp-twake-drive are documented here. The format follows [
 - The `web_app` address and public links end with `#/`.
 - `create_folder` without `parents` names the direct parent when it is missing.
 
+### Security
+- A downloaded file is created in mode 600 (private to the user), like the mail and chat downloads: it used to follow the umask (664 on the test host).
+
 ### Removed
 - `TWAKE_DRIVE_TIMEOUT_MS`: cozy-client has no request timeout.
 - `TWAKE_DRIVE_APP_URL`: links always use the `<instance>-drive.<domain>` form.
