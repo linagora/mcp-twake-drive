@@ -4,11 +4,14 @@ All notable changes to mcp-twake-drive are documented here. The format follows [
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-02
+
 ### Added
 - `cursor` and `next_cursor` on `list_recent_files` and `list_favorites`.
 
 ### Changed
 - All stack access goes through `cozy-client`, with indexed queries for recent files and favourites.
+- The install is heavier: about 300 MB of dependencies with `cozy-client` (29 MB for 0.3.0). The first `list_recent_files`, and the first one with `in_path`, take a few seconds while the stack builds its index.
 - The search index is built at the first `search_files`, not at launch.
 - `list_recent_files` with `in_path` covers the files directly inside the folder, and the path must match exactly.
 - `list_share_links` and `revoke_share_link` go through every page of links.
