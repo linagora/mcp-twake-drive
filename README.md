@@ -26,6 +26,7 @@ Five open source MCP servers connect AI assistants to the whole workplace:
 | **mcp-twake-drive** (this project) | Twake Drive | cozy-stack API |
 | [mcp-twake-chat](https://github.com/linagora/mcp-twake-chat) | Twake Chat | Matrix |
 | [mcp-twake-space](https://github.com/linagora/mcp-twake-space) | Twake Space (team spaces) | Twake Space API |
+| [mcp-twake-project](https://github.com/linagora/mcp-twake-project) | Twake Project (projects, boards, tasks) | Twake Project API |
 
 Used together, they let one assistant prepare a meeting from the invitation, the related email thread, the chat discussion and the documents in the drive, without your data leaving your servers.
 
