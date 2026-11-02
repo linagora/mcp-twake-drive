@@ -1,16 +1,15 @@
 /**
- * Local metadata index of the drive, for name search and "recent files".
+ * Local metadata index of the drive, for name search.
  *
  * The cozy-stack has no server-side search: a Mango `$regex` on names scans
  * every document and times out on a large drive, which is why the Twake Drive
  * web and mobile apps search a locally replicated copy. We do the same with
  * the light `/files/_changes` feed (names, folders, types, sizes, dates only),
  * persisted to a private cache file and refreshed incrementally from the last
- * sequence before every query.
+ * sequence before every search.
  */
 import { mkdir, readFile, rename, writeFile, chmod } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { DriveClient } from './drive.js';
 
 export interface Entry {
   n: string; // name
@@ -44,7 +43,7 @@ export interface Hit {
   updated_at?: string;
 }
 
-const FIELDS = 'type,name,dir_id,path,trashed,mime,class,size,updated_at';
+const FIELDS = ['type', 'name', 'dir_id', 'path', 'trashed', 'mime', 'class', 'size', 'updated_at'];
 const BATCH = 10000;
 
 export function fold(text: string): string {
@@ -62,7 +61,8 @@ export class FileIndex {
   lastSync?: Date;
 
   constructor(
-    private readonly drive: DriveClient,
+    private readonly client: any,
+    private readonly baseUrl: string,
     private readonly cacheFile: string
   ) {}
 
@@ -75,7 +75,7 @@ export class FileIndex {
     this.loaded = true;
     try {
       const snap = JSON.parse(await readFile(this.cacheFile, 'utf8')) as Snapshot;
-      if (snap.version === 1 && snap.base === this.drive.config.baseUrl) {
+      if (snap.version === 1 && snap.base === this.baseUrl) {
         this.entries = new Map(Object.entries(snap.entries));
         this.seq = snap.seq;
       }
@@ -87,7 +87,7 @@ export class FileIndex {
   private async save(): Promise<void> {
     const snap: Snapshot = {
       version: 1,
-      base: this.drive.config.baseUrl,
+      base: this.baseUrl,
       seq: this.seq,
       synced_at: new Date().toISOString(),
       entries: Object.fromEntries(this.entries),
@@ -113,20 +113,10 @@ export class FileIndex {
     await this.load();
     for (;;) {
       const initial = this.seq === '0';
-      const res = await this.drive.json<{
-        last_seq: string;
-        pending?: number;
-        results: Array<{ id: string; deleted?: boolean; doc?: Record<string, any> }>;
-      }>('GET', '/files/_changes', {
-        query: {
-          since: this.seq,
-          include_docs: true,
-          fields: FIELDS,
-          limit: BATCH,
-          skip_deleted: initial ? true : undefined,
-        },
-        accept: 'application/json',
-      });
+      // Q() has no query on the changes feed.
+      const res: { newLastSeq: string; pending?: number; results: Array<{ id: string; deleted?: boolean; doc?: Record<string, any> }> } = await this.client
+        .collection('io.cozy.files')
+        .fetchChanges({ since: this.seq }, { includeDocs: true, fields: FIELDS, limit: BATCH, skipDeleted: initial ? true : undefined });
       for (const r of res.results) {
         if (r.deleted || !r.doc) {
           this.entries.delete(r.id);
@@ -143,17 +133,11 @@ export class FileIndex {
         if (d.trashed) e.x = 1;
         this.entries.set(r.id, e);
       }
-      this.seq = res.last_seq;
+      this.seq = res.newLastSeq;
       if (res.results.length > 0) await this.save();
       if (!res.pending || res.results.length === 0) break;
     }
     this.lastSync = new Date();
-  }
-
-  /** Path of a folder known to the index (after a sync). */
-  dirPath(id: string): string | undefined {
-    if (id === 'io.cozy.files.root-dir') return '/';
-    return this.entries.get(id)?.path;
   }
 
   private pathOf(id: string, e: Entry): string | undefined {
@@ -212,21 +196,5 @@ export class FileIndex {
     }
     scored.sort((a, b) => b.score - a.score || (a.u < b.u ? 1 : a.u > b.u ? -1 : 0));
     return { total: scored.length, hits: scored.slice(0, opts.limit).map((s) => s.hit) };
-  }
-
-  /** Most recently updated files (dates in the future are ignored: bogus client clocks). */
-  recent(limit: number, inPath?: string): Hit[] {
-    const horizon = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
-    const scope = inPath ? fold(inPath.replace(/\/+$/, '')) : undefined;
-    const files: Array<{ u: string; hit: Hit }> = [];
-    for (const [id, e] of this.entries) {
-      if (e.t !== 'f' || !e.u || e.u > horizon) continue;
-      const path = this.pathOf(id, e);
-      if (!this.visible(id, e, path)) continue;
-      if (scope && !(path && fold(path).startsWith(scope + '/'))) continue;
-      files.push({ u: e.u, hit: this.hit(id, e, path) });
-    }
-    files.sort((a, b) => (a.u < b.u ? 1 : a.u > b.u ? -1 : 0));
-    return files.slice(0, limit).map((f) => f.hit);
   }
 }

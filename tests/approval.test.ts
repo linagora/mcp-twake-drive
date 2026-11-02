@@ -7,7 +7,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { DriveClient } from '../src/drive.js';
+import { createCozyClient } from '../src/drive.js';
 import type { Config } from '../src/config.js';
 import { registerTools } from '../src/tools.js';
 import { FileIndex } from '../src/file-index.js';
@@ -16,11 +16,11 @@ import { approvalMessage } from '../src/approval.js';
 const config: Config = {
   baseUrl: 'https://alice.twake.example.com',
   cacheDir: '/tmp/twake-drive-test-cache',
-  appUrl: 'https://alice-drive.twake.example.com',
   downloadDir: '/tmp/twake-drive-test',
+  uploadDir: '/tmp/twake-drive-test',
   maxTextChars: 1000,
-  timeoutMs: 5000,
 };
+const tokens = { getToken: async () => 'tok', invalidate: () => {} };
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/vnd.api+json' } });
 const dir = (id: string, path: string) => ({ data: { id, attributes: { type: 'directory', name: path.split('/').pop() || '/', path } } });
@@ -43,7 +43,9 @@ function stack() {
     }
     if (p === '/sharings/drives') return json(200, { data: [{ id: 'drv1', attributes: { description: 'Équipe Projet', rules: [{ values: ['root1'] }] } }] });
     if (p === '/permissions/doctype/io.cozy.files/shared-by-link') return json(200, { data: [{ id: 'perm1', attributes: { permissions: { files: { values: ['f1'] } } } }] });
-    if (p === '/files/trash') return json(200, { data: [{ id: 't1', attributes: { name: 'old.txt' } }, { id: 't2', attributes: { name: 'older.txt' } }] });
+    if (p === '/files/io.cozy.files.trash-dir') {
+      return json(200, { data: { id: 'io.cozy.files.trash-dir', attributes: { type: 'directory' } }, included: [{ id: 't1', attributes: { name: 'old.txt' } }, { id: 't2', attributes: { name: 'older.txt' } }] });
+    }
     if (p.endsWith('/metadata')) {
       const path = url.searchParams.get('Path') ?? '/';
       return path.endsWith('.txt') ? json(200, file('f1')) : json(200, dir('d-' + path, path));
@@ -56,14 +58,15 @@ function stack() {
     if (id.startsWith('f') || id.startsWith('t')) return json(200, file(id));
     return json(404, { errors: [{ detail: 'not found' }] });
   });
-  return { impl: impl as unknown as typeof fetch, writes };
+  vi.stubGlobal('fetch', impl);
+  return { writes };
 }
 
 async function connect(answer: 'accept' | 'decline' | 'cancel', opts: { elicitation?: boolean; mode?: 'elicit' | 'client' } = {}) {
-  const { impl, writes } = stack();
-  const drive = new DriveClient(config, { getToken: async () => 'tok', invalidate: () => {} }, impl);
+  const { writes } = stack();
+  const cozy = createCozyClient(config.baseUrl, tokens);
   const server = new McpServer({ name: 't', version: '0' });
-  registerTools(server, drive, new FileIndex(drive, `/tmp/twake-drive-approval-${process.pid}-${Math.random()}.json`), {
+  registerTools(server, cozy, config, new FileIndex(cozy, config.baseUrl, `/tmp/twake-drive-approval-${process.pid}-${Math.random()}.json`), {
     approval: { mode: opts.mode ?? 'elicit', language: 'fr', timeoutMs: 2000 },
   });
   const [a, b] = InMemoryTransport.createLinkedPair();
@@ -112,9 +115,9 @@ describe('prior approval of writes', () => {
     const READ_ONLY = ['get_drive_info', 'list_folder', 'get_item', 'search_files', 'list_recent_files', 'list_favorites', 'list_trash', 'read_file', 'list_shared_drives', 'list_sharings', 'list_share_links'];
     const LOCAL_WRITE = 'download_file';
     const server = new McpServer({ name: 't', version: '0' });
-    const { impl } = stack();
-    const drive = new DriveClient(config, { getToken: async () => 'tok', invalidate: () => {} }, impl);
-    registerTools(server, drive, new FileIndex(drive, `/tmp/twake-drive-approval-${process.pid}-x.json`));
+    stack();
+    const cozy = createCozyClient(config.baseUrl, tokens);
+    registerTools(server, cozy, config, new FileIndex(cozy, config.baseUrl, `/tmp/twake-drive-approval-${process.pid}-x.json`));
     const [a, b] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'c', version: '0' });
     await Promise.all([server.connect(a), client.connect(b)]);
@@ -144,7 +147,7 @@ describe('prior approval of writes', () => {
     const t = await connect('accept');
     await t.call('move_item', { id: 'f1', destination_id: 'd2' });
     expect(t.prompts[0]).toContain('Drive : Mon Drive');
-    expect(t.prompts[0]).toContain('Élément : /Docs/Rapport.txt (2.0 KB)');
+    expect(t.prompts[0]).toContain('Élément : /Docs/Rapport.txt (2 KB)');
     expect(t.prompts[0]).toContain('Destination : /Archives');
     await t.call('create_share_link', { id: 'f1', write: true, expires_at: '2026-12-01T00:00:00Z' });
     expect(t.prompts[1]).toContain('Créer un lien public (toute personne ayant le lien)');
