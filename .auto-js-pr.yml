@@ -1,0 +1,6 @@
+# Inscrit ce dépôt au bot auto-js-pr (mises à jour de dépendances vulnérables).
+#
+# Tests vitest autonomes (aucun .env ni serveur réel), puis tsc.
+verifyCommands:
+  - npm run test
+  - npm run build
