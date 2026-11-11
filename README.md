@@ -72,6 +72,16 @@ Used together, they let one assistant prepare a meeting from the invitation, the
 
 ## Installation
 
+### Quick start with mcp-twake-ai (recommended)
+
+```bash
+npx mcp-twake-ai setup
+```
+
+[mcp-twake-ai](https://github.com/linagora/mcp-twake-wizard) sets up this server and the other Twake.ai MCP servers for your Twake.ai account: it asks for your email, signs you in at the Twake.ai identity provider (in the browser, or with a code over SSH), and finds the agents on your computer (Claude Code, Hermes, Claude Desktop, Cursor, VS Code) and the services of your account. It then installs pinned versions of the servers, writes their entries in each agent's configuration and checks that each server starts. For any other agent, `mcp-twake-ai export --agent <id>` writes the configuration files.
+
+### Manual installation
+
 **From npm:**
 
 ```bash
@@ -126,7 +136,11 @@ Ref. 3f9a1c · Accept to do it now, refuse to cancel.
 
 ### Getting a token
 
-The server does not run an OAuth flow itself: an external broker owns the grant and hands out short-lived access tokens. This keeps the refresh token out of the MCP client configuration and lets one broker serve several tools. A broker must:
+The server does not run an OAuth flow itself: an external broker owns the grant and hands out short-lived access tokens. This keeps the refresh token out of the MCP client configuration and lets one broker serve several tools.
+
+For Twake.ai, [mcp-twake-ai](https://github.com/linagora/mcp-twake-wizard) is that broker: sign in once with `mcp-twake-ai login --drive` (`mcp-twake-ai setup` does it for you), then set `TWAKE_DRIVE_TOKEN_COMMAND="/usr/local/bin/mcp-twake-ai token drive"`. Give the command with an absolute path, as some MCP clients do not see your `PATH`. It runs through the system shell (`sh`, or `cmd.exe` on Windows, where paths go in double quotes).
+
+Any other command printing the token as above works. To write your own broker, it must:
 
 1. register an OAuth client on the instance (`POST /auth/register`);
 2. send the user once to `/auth/authorize` (PKCE) with the scopes below, then exchange the code at `POST /auth/access_token`;
@@ -150,7 +164,7 @@ Edit `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/
       "args": ["-y", "mcp-twake-drive"],
       "env": {
         "TWAKE_DRIVE_URL": "https://alice.twake.example.com",
-        "TWAKE_DRIVE_TOKEN_COMMAND": "/usr/local/bin/my-token-broker drive-token --json"
+        "TWAKE_DRIVE_TOKEN_COMMAND": "/usr/local/bin/mcp-twake-ai token drive"
       }
     }
   }
@@ -162,7 +176,7 @@ Edit `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/
 ```bash
 claude mcp add twake-drive --scope user \
   -e TWAKE_DRIVE_URL=https://alice.twake.example.com \
-  -e "TWAKE_DRIVE_TOKEN_COMMAND=/usr/local/bin/my-token-broker drive-token --json" \
+  -e "TWAKE_DRIVE_TOKEN_COMMAND=/usr/local/bin/mcp-twake-ai token drive" \
   -- npx -y mcp-twake-drive
 ```
 
@@ -175,7 +189,7 @@ mcp_servers:
     args: ["-y", "mcp-twake-drive"]
     env:
       TWAKE_DRIVE_URL: https://alice.twake.example.com
-      TWAKE_DRIVE_TOKEN_COMMAND: /usr/local/bin/my-token-broker drive-token --json
+      TWAKE_DRIVE_TOKEN_COMMAND: /usr/local/bin/mcp-twake-ai token drive
       TWAKE_DRIVE_APPROVAL_TIMEOUT_MS: "330000"
       USER_LANGUAGE: fr
     timeout: 420            # longer than the approval wait
