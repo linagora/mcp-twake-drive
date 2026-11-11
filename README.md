@@ -78,7 +78,7 @@ Used together, they let one assistant prepare a meeting from the invitation, the
 npx mcp-twake-ai setup
 ```
 
-[mcp-twake-ai](https://github.com/linagora/mcp-twake-wizard) sets up this server and the other Twake.ai MCP servers for your Twake.ai account: it asks for your email, signs you in at the Twake.ai identity provider (in the browser, or with a code over SSH), and finds the agents on your computer (Claude Code, Hermes, Claude Desktop, Cursor, VS Code) and the services of your account. It then installs pinned versions of the servers, writes their entries in each agent's configuration and checks that each server starts. For any other agent, `mcp-twake-ai export --agent <id>` writes the configuration files.
+[mcp-twake-ai](https://github.com/linagora/mcp-twake-ai) sets up this server and the other Twake.ai MCP servers for your Twake.ai account: it asks for your email, signs you in at the Twake.ai identity provider (in the browser, or with a code over SSH), and finds the agents on your computer (Claude Code, Hermes, Claude Desktop, Cursor, VS Code) and the services of your account. It then installs pinned versions of the servers, writes their entries in each agent's configuration and checks that each server starts. For any other agent, `mcp-twake-ai export --agent <id>` writes the configuration files.
 
 ### Manual installation
 
@@ -138,7 +138,7 @@ Ref. 3f9a1c · Accept to do it now, refuse to cancel.
 
 The server does not run an OAuth flow itself: an external broker owns the grant and hands out short-lived access tokens. This keeps the refresh token out of the MCP client configuration and lets one broker serve several tools.
 
-For Twake.ai, [mcp-twake-ai](https://github.com/linagora/mcp-twake-wizard) is that broker: sign in once with `mcp-twake-ai login --drive` (`mcp-twake-ai setup` does it for you), then set `TWAKE_DRIVE_TOKEN_COMMAND="/usr/local/bin/mcp-twake-ai token drive"`. Give the command with an absolute path, as some MCP clients do not see your `PATH`. It runs through the system shell (`sh`, or `cmd.exe` on Windows, where paths go in double quotes).
+For Twake.ai, [mcp-twake-ai](https://github.com/linagora/mcp-twake-ai) is that broker: sign in once with `mcp-twake-ai login --drive` (`mcp-twake-ai setup` does it for you), then set `TWAKE_DRIVE_TOKEN_COMMAND="/usr/local/bin/mcp-twake-ai token drive"`. Give the command with an absolute path, as some MCP clients do not see your `PATH`. It runs through the system shell (`sh`, or `cmd.exe` on Windows, where paths go in double quotes).
 
 Any other command printing the token as above works. To write your own broker, it must:
 
