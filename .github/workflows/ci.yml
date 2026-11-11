@@ -26,3 +26,16 @@ jobs:
       - run: npm run build
       - run: npm test
       - run: npm run test:start
+
+  token-command-windows:
+    # The token command runs through the system shell, which is cmd.exe on Windows.
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npx vitest run token-command-shell
