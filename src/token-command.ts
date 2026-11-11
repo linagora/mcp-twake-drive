@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { exec } from 'node:child_process';
 
 /**
  * Token provider backed by an external command (TWAKE_DRIVE_TOKEN_COMMAND).
@@ -35,10 +35,10 @@ export class CommandTokenProvider {
 
   private run(): Promise<string> {
     return new Promise((resolve, reject) => {
-      execFile(
-        '/bin/sh',
-        ['-c', this.command],
-        { timeout: 30000, maxBuffer: 1024 * 1024 },
+      // The system shell: /bin/sh, or cmd.exe on Windows, without a console window.
+      exec(
+        this.command,
+        { timeout: 30000, maxBuffer: 1024 * 1024, windowsHide: true },
         (error, stdout, stderr) => {
           if (error) {
             const detail = String(stderr || '').trim().split('\n').slice(-1)[0] || error.message;
