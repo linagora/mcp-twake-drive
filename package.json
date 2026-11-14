@@ -48,7 +48,7 @@
     "cozy-device-helper": "^4.0.3",
     "cozy-flags": "^4.9.2",
     "cozy-logger": "^1.18.1",
-    "cozy-stack-client": "^61.0.0",
+    "cozy-stack-client": "^62.0.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {
