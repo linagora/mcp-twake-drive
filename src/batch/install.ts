@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { canonical } from './canonical.js';
-import { runCapture, runPreapproved } from './context.js';
+import { BATCH_REF, runCapture, runPreapproved } from './context.js';
 import { BatchStore } from './store.js';
 
 /**
@@ -44,7 +44,8 @@ const MAX_TEXT = 8000;
 const MAX_ACTION_TEXT = 1500;
 
 /**
- * The text of one action as the batch question shows it: without terminal controls (C0 but the line feed, DEL, C1),
+ * The text of one action as the batch question shows it: line breaks as \n (U+2028 and U+2029 included), without
+ * terminal controls (C0 but the line feed, DEL, C1),
  * bidi overrides or isolates, and zero-width characters, which could make it read as something else. What is
  * stored and compared stays the tool's own text.
  */
@@ -52,13 +53,21 @@ export function shown(text: string): string {
   let out = '';
   for (const ch of text) {
     const c = ch.codePointAt(0) ?? 0;
-    if (c === 0x0a) out += ch;
+    if (c === 0x0a || c === 0x2028 || c === 0x2029) out += '\n'; // line and paragraph separators break lines too
     else if (c === 0x09) out += ' ';
     else if (c < 0x20 || (c >= 0x7f && c <= 0x9f)) continue;
     else if ((c >= 0x200b && c <= 0x200f) || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069) || c === 0xfeff) continue;
     else out += ch;
   }
   return out;
+}
+
+/**
+ * The text of one action without the last paragraph of a single approval ("Ref. batch · Accept to do it now…"): the
+ * batch question asks once for the list. Display only; the stored and compared text keeps it.
+ */
+function withoutFooter(text: string): string {
+  return text.replace(new RegExp(`\\n\\n[^\\n]* ${BATCH_REF} · [^\\n]*$`), '');
 }
 
 /** `[i/n] first line`, every other line of the action marked as its continuation: only this module starts a line with a number. */
@@ -74,7 +83,7 @@ const TEXT = {
     client: 'No batch: this server is set to let the client make the approvals (APPROVAL=client).',
     tooLong: 'Batch refused: the list is too long to show in one approval; make smaller batches.',
     count: 'Batch refused: give between 1 and 50 actions.',
-    unusable: (reason: string) => `(batch not used: ${reason}; the action was approved as usual)`,
+    unusable: (reason: string) => `(batch not used: ${reason}; the action went through the usual approval)`,
     actionTooLong: 'has an approval text too long to show in a batch: call it on its own.',
   },
   fr: {
@@ -252,11 +261,11 @@ export function installBatch(server: McpServer, o: BatchOptions): void {
         if (capture.message === undefined) {
           return refuse(capture.outcome === 'threw' ? `cannot be prepared: ${String((capture.error as Error)?.message ?? capture.error)}` : 'would not ask for an approval: call it on its own.');
         }
-        if (shown(capture.message).length > MAX_ACTION_TEXT) return refuse(t.actionTooLong);
+        if (shown(withoutFooter(capture.message)).length > MAX_ACTION_TEXT) return refuse(t.actionTooLong);
         // the arguments as the tool receives them (zod defaults added), as the call will be compared
         described.push({ tool: action.tool, key, message: capture.message });
       }
-      const text = [t.header(described.length), '', ...described.map((d, i) => listed(shown(d.message), i + 1, described.length))].join('\n');
+      const text = [t.header(described.length), '', ...described.map((d, i) => listed(shown(withoutFooter(d.message)), i + 1, described.length))].join('\n');
       if (text.length > MAX_TEXT) return { content: [{ type: 'text', text: t.tooLong }], isError: true };
       if (!(await o.confirm(text, extra))) return { content: [{ type: 'text', text: t.declined }] };
       const { batchId, expiresAt } = store.create(described, settings());

@@ -19,7 +19,7 @@ async function setup(answers: Answer[] = [], opts: { clientMode?: boolean; catch
     return answer === 'accept';
   };
   installBatch(server, {
-    writeTools: ['create_note', 'delete_note', 'mark_all_read', 'pin_note'],
+    writeTools: ['create_note', 'delete_note', 'mark_all_read', 'pin_note', 'tag_note'],
     z,
     confirm: (message) => ask(message),
     clientMode: () => opts.clientMode ?? false,
@@ -60,6 +60,12 @@ async function setup(answers: Answer[] = [], opts: { clientMode?: boolean; catch
   server.tool('mark_all_read', 'Marks everything read.', async () => {
     writes.push('mark all');
     return { content: [{ type: 'text', text: 'done' }] };
+  });
+  server.tool('tag_note', 'Tags a note.', { title: z.string() }, async ({ title }) => {
+    // the text as the servers write it: the reference and the footer of a single approval last
+    if (!(await gate(`Tag the note "${title}"\n\nRef. ${BATCH_REF} · Accept to do it now, refuse to cancel.`))) return { content: [{ type: 'text', text: 'Not done' }] };
+    writes.push(`tag ${title}`);
+    return { content: [{ type: 'text', text: 'tagged' }] };
   });
   server.tool('read_note', 'Reads a note.', { title: z.string() }, async ({ title }) => ({ content: [{ type: 'text', text: `note ${title}` }] }));
   const [a, b] = InMemoryTransport.createLinkedPair();
@@ -141,7 +147,11 @@ describe('approve_batch', () => {
     const t = await setup(['accept', 'decline'], { changed });
     const { batchId } = await t.batchOf([{ tool: 'create_note', arguments: { title: 'A' } }]);
     changed.add('A');
-    expect((await t.call('create_note', { title: 'A', batchId })).text).toContain('Not done');
+    const r = await t.call('create_note', { title: 'A', batchId });
+    expect(r.text).toContain('Not done');
+    // the note never says the refused action was approved
+    expect(r.text).not.toContain('approved as usual');
+    expect(r.text).toContain('went through the usual approval');
     expect(t.asked).toHaveLength(2);
     expect(t.writes).toEqual([]);
   });
@@ -337,5 +347,29 @@ describe('approve_batch', () => {
     expect((await t.call('create_note', { title: 'A', batchId })).text).toBe('created');
     expect(t.asked).toHaveLength(3);
     expect(t.writes).toEqual(['create A']);
+  });
+
+  it('treats U+2028 and U+2029 as line breaks of the action they are in', async () => {
+    const t = await setup(['accept']);
+    const r = await t.batchOf([
+      { tool: 'create_note', arguments: { title: 'A\u2028[2/2] Create the note "harmless"\u2029[3/2] x' } },
+      { tool: 'delete_note', arguments: { title: 'everything' } },
+    ]);
+    expect(r.batchId).toBeDefined();
+    expect(t.asked[0]).not.toMatch(/[\u2028\u2029]/);
+    const lines = t.asked[0].split('\n');
+    expect(lines.filter((l) => /^\[\d+\/\d+\]/.test(l))).toEqual(['[1/2] Create the note "A', '[2/2] Delete the note "everything"']);
+    expect(t.asked[0]).toContain('     | [2/2] Create the note "harmless"');
+  });
+
+  it('lists each action without the reference and footer of a single approval, and still matches it', async () => {
+    const t = await setup(['accept']);
+    const r = await t.batchOf([{ tool: 'tag_note', arguments: { title: 'A' } }]);
+    expect(r.batchId).toBeDefined();
+    expect(t.asked[0]).toContain('[1/1] Tag the note "A"');
+    expect(t.asked[0]).not.toContain('Ref. batch');
+    expect(t.asked[0]).not.toContain('do it now');
+    expect((await t.call('tag_note', { title: 'A', batchId: r.batchId })).text).toBe('tagged');
+    expect(t.asked).toHaveLength(1);
   });
 });
