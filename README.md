@@ -9,7 +9,7 @@
 
 ## What is it?
 
-`mcp-twake-drive` is a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server. MCP is the open standard that lets AI assistants (Claude Desktop, Claude Code, Hermes Agent, Cursor, VS Code and many others) use external tools. This server exposes your drive to the assistant as **31 tools**: browse, search, read, create, organise and share files, notes and documents.
+`mcp-twake-drive` is a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server. MCP is the open standard that lets AI assistants (Claude Desktop, Claude Code, Hermes Agent, Cursor, VS Code and many others) use external tools. This server exposes your drive to the assistant as **32 tools**: browse, search, read, create, organise and share files, notes and documents.
 
 It talks directly to the HTTP API of the **cozy-stack**, the open source server behind Twake Drive (`/files`, `/notes`, `/shortcuts`, `/permissions`, `/sharings/drives`): the same API the Twake Drive web and mobile apps use.
 
@@ -42,7 +42,7 @@ Used together, they let one assistant prepare a meeting from the invitation, the
 
 ## Features
 
-### 31 MCP tools
+### 32 MCP tools
 
 | Category | Tools |
 |---|---|
@@ -51,6 +51,7 @@ Used together, they let one assistant prepare a meeting from the invitation, the
 | Organise | `rename_item`, `move_item`, `copy_file`, `set_favorite`, `set_tags`, `trash_item`, `restore_from_trash`, `revert_version` |
 | Share ⚠️ | `create_share_link` (read-only or edit, optional password and expiry), `revoke_share_link` |
 | Irreversible ⚠️ | `delete_permanently` (only items already in the trash), `empty_trash` |
+| Approval | `approve_batch` (one approval for a series of writes, see [below](#approving-a-series-of-writes-at-once)) |
 
 ⚠️ = makes data public or deletes it for good. Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`).
 
@@ -221,6 +222,10 @@ npx mcp-twake-drive call upload_file --json @upload.json
 - **Writes:** typed by you in a terminal, a write is approved without a question (`--i` asks first). Started by an agent (`CLAUDECODE` or `HERMES_HOME` set), a write is refused: agents write through their MCP tools, which ask you. Without a terminal (cron), a write is refused unless it passes `--yes --as <name>` for a name you allowed once, in a terminal, with `npx mcp-twake-drive allow-unattended <name>`. The allowed names are shared by the six Twake.ai servers, in `~/.config/twake-ai/cli.json` (`%USERPROFILE%\AppData\Roaming\twake-ai\cli.json` on Windows).
 - These rules stop an agent that follows instructions; they cannot stop a program that hides that it is an agent, or rewrites `cli.json`, under your account.
 - With [mcp-twake-ai](https://github.com/linagora/mcp-twake-ai), `npx mcp-twake-ai call drive …` does the same with your Twake.ai sign-in.
+
+## Approving a series of writes at once
+
+Before a series of writes (several folders or uploads), an agent can ask you once for the whole list with `approve_batch`: you see every action, numbered, in one approval. Each call that then carries the `batchId` and matches a listed action exactly runs without another question, once, within 15 minutes. A call that is not in the list, or whose target changed since you approved, asks as usual. With `TWAKE_DRIVE_APPROVAL=client`, there is no batch.
 
 ## Recommended safe configuration
 

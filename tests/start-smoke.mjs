@@ -56,7 +56,7 @@ try {
   await request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'smoke', version: '1' } });
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
   child.kill('SIGUSR2');
-  assert.equal((await request('tools/list', {})).tools.length, 31);
+  assert.equal((await request('tools/list', {})).tools.length, 32); // 31 + approve_batch
   const call = async (name, args) => {
     const result = await request('tools/call', { name, arguments: args });
     assert.ok(!result.isError, `${name}: ${result.content[0].text}`);

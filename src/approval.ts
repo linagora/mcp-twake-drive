@@ -6,6 +6,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { BATCH_REF, batchHook } from './batch/index.js';
 
 export type ApprovalMode = 'elicit' | 'client';
 export type Language = 'en' | 'fr';
@@ -60,6 +61,9 @@ const LABELS = {
 } as const;
 
 export type Action = keyof typeof ACTIONS;
+
+/** The tools that ask through confirm() before writing: the ones approve_batch accepts. */
+export const WRITE_TOOLS = Object.keys(ACTIONS) as Action[];
 export type Label = keyof (typeof LABELS)['en'];
 
 export interface ApprovalRequest {
@@ -103,6 +107,8 @@ export class Approver {
 
   /** Resolves when the user accepted; throws NotApproved or ApprovalUnavailable otherwise. */
   async confirm(req: ApprovalRequest): Promise<void> {
+    // a call approved in a batch whose text did not change goes through; approve_batch describing it stops here
+    if (batchHook(() => approvalMessage(req, this.opts, BATCH_REF)) === 'approved') return;
     if (this.opts.mode === 'client') return;
     if (!this.server.getClientCapabilities()?.elicitation) {
       throw new ApprovalUnavailable(
@@ -122,5 +128,16 @@ export class Approver {
       action = 'cancel';
     }
     if (action !== 'accept') throw new NotApproved(action === 'decline' ? 'decline' : 'cancel');
+  }
+
+  /** The batch question (approve_batch): accepted or not, with the same request and timeout as confirm. */
+  async confirmText(message: string): Promise<boolean> {
+    if (this.opts.mode === 'client' || !this.server.getClientCapabilities()?.elicitation) return false;
+    try {
+      const res = await this.server.elicitInput({ mode: 'form', message, requestedSchema: { type: 'object', properties: {} } }, { timeout: this.opts.timeoutMs });
+      return res.action === 'accept';
+    } catch {
+      return false;
+    }
   }
 }
