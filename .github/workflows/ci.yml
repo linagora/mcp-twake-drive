@@ -39,3 +39,22 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npx vitest run token-command-shell
+
+  command-line:
+    # call, tools and allow-unattended (src/cli-call): paths, process spawning and terminal checks
+    # differ on Windows and macOS
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx vitest run tests/cli-call

@@ -15,6 +15,8 @@ import { CommandTokenProvider } from './token-command.js';
 import { registerTools } from './tools.js';
 import { FileIndex } from './file-index.js';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { isCliCommand, runCliCommand } from './cli-call/index.js';
 
 
 async function main(): Promise<void> {
@@ -44,7 +46,14 @@ async function main(): Promise<void> {
   process.stderr.write(`mcp-twake-drive ${VERSION} connected to ${config.baseUrl}\n`);
 }
 
-main().catch((e) => {
-  process.stderr.write(`mcp-twake-drive: ${(e as Error).message}\n`);
-  process.exit(1);
-});
+const cliArgs = process.argv.slice(2);
+if (isCliCommand(cliArgs)) {
+  // `call`, `tools` and `allow-unattended`: the server's tools from the command line.
+  // exitCode, not exit(): what was written on a piped stdout is flushed first
+  process.exitCode = await runCliCommand(cliArgs, { entry: fileURLToPath(import.meta.url) });
+} else {
+  main().catch((e) => {
+    process.stderr.write(`mcp-twake-drive: ${(e as Error).message}\n`);
+    process.exit(1);
+  });
+}
