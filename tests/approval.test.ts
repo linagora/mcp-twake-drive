@@ -123,7 +123,9 @@ describe('prior approval of writes', () => {
     await Promise.all([server.connect(a), client.connect(b)]);
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
-    expect(names.filter((n) => !READ_ONLY.includes(n) && n !== LOCAL_WRITE).sort()).toEqual(WRITES.map(([n]) => n).sort());
+    // approve_batch writes nothing itself: it asks the user for a list of the others
+    const BATCH = 'approve_batch';
+    expect(names.filter((n) => !READ_ONLY.includes(n) && n !== LOCAL_WRITE && n !== BATCH).sort()).toEqual(WRITES.map(([n]) => n).sort());
     for (const t of tools) expect(t.annotations?.readOnlyHint, t.name).toBe(READ_ONLY.includes(t.name));
   });
 

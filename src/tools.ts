@@ -17,7 +17,8 @@ import {
 } from './queries.js';
 import { isTar, isTextLike, markdownFromTar, summarize, webLink, withExtension } from './format.js';
 import type { FileIndex, Hit } from './file-index.js';
-import { Approver, ApprovalUnavailable, NotApproved, type ApprovalMode, type Language } from './approval.js';
+import { Approver, ApprovalUnavailable, NotApproved, WRITE_TOOLS, type ApprovalMode, type Language } from './approval.js';
+import { installBatch } from './batch/index.js';
 
 const TEMPLATES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'templates');
 
@@ -106,6 +107,16 @@ export function registerTools(
   const stack = client.getStackClient();
   const approval = opts.approval ?? config.approval ?? { mode: 'elicit' as const, language: 'en' as const, timeoutMs: 600_000 };
   const approver = new Approver(server.server, { ...approval, as: new URL(config.baseUrl).host });
+  // approve_batch, and batchId on every write tool: installed before the tools are registered (spec §5)
+  installBatch(server, {
+    writeTools: WRITE_TOOLS,
+    z,
+    confirm: (message) => approver.confirmText(message),
+    clientMode: () => approver.opts.mode === 'client',
+    language: () => approver.opts.language,
+    // the account the approval texts are written for
+    settings: () => approver.opts.as ?? '',
+  });
   const L = (k: Parameters<Approver['label']>[0]) => approver.label(k);
   const humanSize = (size: number): string => client.collection(FILES_DOCTYPE).getBeautifulSize({ size }, 1);
   const sharedDrives = async (): Promise<CozyDoc[]> => (await client.collection('io.cozy.sharings').fetchSharedDrives()).data;

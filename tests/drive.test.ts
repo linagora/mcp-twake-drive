@@ -179,7 +179,7 @@ describe('MCP tools (in-memory)', () => {
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
-        'copy_file', 'create_document', 'create_drawing', 'create_folder', 'create_note', 'create_share_link',
+        'approve_batch', 'copy_file', 'create_document', 'create_drawing', 'create_folder', 'create_note', 'create_share_link',
         'create_shortcut', 'delete_permanently', 'download_file', 'empty_trash', 'get_drive_info', 'get_item',
         'list_favorites', 'list_folder', 'list_recent_files', 'list_share_links', 'list_shared_drives', 'list_sharings',
         'list_trash', 'move_item', 'read_file', 'rename_item', 'restore_from_trash', 'revert_version',
