@@ -11,6 +11,8 @@ export interface OpenClientOptions {
   /** the client's name and version, as the server sees them */
   name: string;
   version: string;
+  /** the whole budget, start included: initialize and tools/list do not get the SDK's own 60 s */
+  timeoutMs: number;
   onElicit(params: ElicitRequest['params']): Promise<ElicitResult>;
 }
 
@@ -52,12 +54,14 @@ export async function openClient(o: OpenClientOptions): Promise<McpSession> {
     process.off('SIGTERM', stop);
     await client.close().catch(() => undefined);
   };
+  const deadline = Date.now() + o.timeoutMs;
+  const left = () => Math.max(1, deadline - Date.now());
   try {
-    await client.connect(transport);
+    await client.connect(transport, { timeout: left() });
     const tools: Tool[] = [];
     let cursor: string | undefined;
     do {
-      const page = await client.listTools(cursor === undefined ? undefined : { cursor });
+      const page = await client.listTools(cursor === undefined ? undefined : { cursor }, { timeout: left() });
       tools.push(...page.tools);
       cursor = page.nextCursor;
     } while (cursor);
@@ -66,8 +70,9 @@ export async function openClient(o: OpenClientOptions): Promise<McpSession> {
       stderr: () => stderr,
       close,
       call: async (name, args, timeoutMs) => {
+        const budget = Math.min(timeoutMs, left());
         try {
-          return (await client.callTool({ name, arguments: args }, undefined, { timeout: timeoutMs, maxTotalTimeout: timeoutMs })) as CallToolResult;
+          return (await client.callTool({ name, arguments: args }, undefined, { timeout: budget, maxTotalTimeout: budget })) as CallToolResult;
         } catch (error) {
           throw unavailable(error, stderr);
         }

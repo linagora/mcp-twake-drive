@@ -119,6 +119,26 @@ describe('call', { timeout: 20_000 }, () => {
     expect(r.err.startsWith(`${command}: `)).toBe(true);
   });
 
+  it('gives up on a server that does not answer its start within --timeout', async () => {
+    const started = Date.now();
+    const r = await cli(['call', 'echo', '--arg', 'text=x', '--timeout', '1'], {}, { FAKE_INIT_DELAY_MS: '4000' });
+    expect(r.code).toBe(4);
+    expect(Date.now() - started).toBeLessThan(3500);
+  });
+
+  it('stops asking when the call ends while the question is shown', async () => {
+    let signal: AbortSignal | undefined;
+    const r = await cli(['call', 'send_note', '--arg', 'text=x', '--i', '--timeout', '1'], {
+      ...user,
+      ask: (_question, abort) => {
+        signal = abort;
+        return new Promise<string>(() => undefined);
+      },
+    });
+    expect(r.code).toBe(4);
+    expect(signal?.aborted).toBe(true);
+  });
+
   it('stops a tool that never answers', async () => {
     expect((await cli(['call', 'hang', '--timeout', '1'])).code).toBe(4);
   });

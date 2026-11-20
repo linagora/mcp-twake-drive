@@ -5,7 +5,7 @@ import { openClient, type OpenClientOptions } from '../../src/cli-call/client.js
 const fake = fileURLToPath(new URL('./fake-server.mjs', import.meta.url));
 
 function options(overrides: Partial<OpenClientOptions> = {}): OpenClientOptions {
-  return { command: process.execPath, args: [fake], env: { ...process.env }, name: 'test', version: '0.0.0', onElicit: async () => ({ action: 'decline' }), ...overrides };
+  return { command: process.execPath, args: [fake], env: { ...process.env }, name: 'test', version: '0.0.0', timeoutMs: 15_000, onElicit: async () => ({ action: 'decline' }), ...overrides };
 }
 
 describe('openClient', { timeout: 20_000 }, () => {

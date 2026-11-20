@@ -17,7 +17,8 @@ process.stderr.write('fake tools ready\n');
 createInterface({ input: process.stdin }).on('line', (line) => {
   const message = JSON.parse(line);
   if (message.method === 'initialize') {
-    return send({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fake-tools', version: '1' } } });
+    const answer = () => send({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fake-tools', version: '1' } } });
+    return setTimeout(answer, Number(process.env.FAKE_INIT_DELAY_MS ?? 0));
   }
   if (message.method === 'tools/list') return send({ jsonrpc: '2.0', id: message.id, result: { tools } });
   if (message.method === 'tools/call') {

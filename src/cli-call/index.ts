@@ -27,7 +27,8 @@ export interface CliDeps {
   home: string | undefined;
   stdinTTY: boolean;
   stderrTTY: boolean;
-  ask(question: string): Promise<string>;
+  /** stops waiting (and frees the terminal) when the signal aborts */
+  ask(question: string, signal: AbortSignal): Promise<string>;
   readStdin(): Promise<string>;
 }
 
@@ -38,10 +39,12 @@ export function isCliCommand(argv: string[]): boolean {
   return COMMANDS.includes(argv[0] ?? '');
 }
 
-function askOnStderr(question: string): Promise<string> {
+function askOnStderr(question: string, signal: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
     const rl = createInterface({ input: process.stdin, output: process.stderr });
     let answered = false;
+    // the call ended (timeout, server gone, signal) while the question was shown: let go of the terminal
+    signal.addEventListener('abort', () => rl.close(), { once: true });
     rl.once('line', (line) => {
       answered = true;
       rl.close();
@@ -170,6 +173,8 @@ async function dispatch(argv: string[], pkg: { name: string; version: string }, 
   const { context, marker } = detectContext({ stdinTTY: d.stdinTTY, stderrTTY: d.stderrTTY, env: d.env, markers: settings.agentMarkers });
   // read before the server starts: a bad --json costs nothing
   const json = typeof v.json === 'string' ? await readJsonArgument(v.json, d.readStdin) : {};
+  // aborted when the command ends: a question still shown must not keep the process alive
+  const asking = new AbortController();
   const approver = cliApprover({
     context,
     marker,
@@ -179,11 +184,12 @@ async function dispatch(argv: string[], pkg: { name: string; version: string }, 
     allowed: settings.allowedUnattended,
     stdinTaken: v.json === '-',
     command: pkg.name,
-    ask: d.ask,
+    ask: (question) => d.ask(question, asking.signal),
     stderr: d.io.stderr,
     lang: languageOf(d.env),
   });
   const session: McpSession = await openClient({
+    timeoutMs: timeout * 1000,
     command: executable,
     args: serverArgs,
     env: d.env,
@@ -208,6 +214,7 @@ async function dispatch(argv: string[], pkg: { name: string; version: string }, 
     if (v.verbose) d.io.stderr(printable(session.stderr()));
     return exitCodeFor(result, approver.declined);
   } finally {
+    asking.abort();
     await session.close();
   }
 }
@@ -231,7 +238,7 @@ async function allowUnattended(args: string[], command: string, file: string, d:
   const settingsMarkers = settings.agentMarkers;
   const { context } = detectContext({ stdinTTY: d.stdinTTY, stderrTTY: d.stderrTTY, env: d.env, markers: settingsMarkers });
   if (context !== 'user') throw new CliError(2, 'allow-unattended asks you to confirm in a terminal: type it yourself, not from a script or an agent.');
-  const answer = await d.ask(text(languageOf(d.env), 'confirmAllow', { name })).catch(() => '');
+  const answer = await d.ask(text(languageOf(d.env), 'confirmAllow', { name }), new AbortController().signal).catch(() => '');
   if (!isYes(answer)) {
     d.io.stdout('Nothing changed.\n');
     return 1;

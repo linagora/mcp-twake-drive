@@ -82,6 +82,10 @@ describe('terminal control sequences from a server', () => {
     }
   });
 
+  it('never hide the text after an unterminated sequence', () => {
+    expect(renderResult({ content: [{ type: 'text', text: 'Subject A \u001b] trap\nSubject B\nSubject C' }] }, false)).toBe('Subject A ] trap\nSubject B\nSubject C\n');
+  });
+
   it('keep new lines and tabs', () => {
     expect(renderResult({ content: [{ type: 'text', text: 'a\tb\nc' }] }, false)).toBe('a\tb\nc\n');
   });

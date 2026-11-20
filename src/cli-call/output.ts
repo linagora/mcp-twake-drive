@@ -13,7 +13,8 @@ export function printable(text: string): string {
   // control characters are what these patterns look for
   /* eslint-disable no-control-regex */
   return text
-    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g, '')
+    // only a terminated OSC goes whole: an unterminated one must not take the text after it (its ESC goes below)
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '')
     .replace(/(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]/g, '')
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '');
   /* eslint-enable no-control-regex */
