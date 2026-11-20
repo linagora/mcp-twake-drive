@@ -38,6 +38,8 @@ Used together, they let one assistant prepare a meeting from the invitation, the
 - **Keep things tidy**: rename, move, copy, tag, mark as favourite, trash and restore, revert to a previous version.
 - **Share safely**: create a read-only (or edit) public link with an optional password and expiry, and revoke it.
 - **Shared drives**: work in the shared drives of your team as well as in your own drive.
+- **One approval for a series of writes**: before several writes (several folders or uploads), the assistant can ask you once for the exact list with `approve_batch`. Each listed call then runs without another question, once, within 15 minutes, in the session that approved it; anything else, or anything changed since, asks as usual (see [Approving a series of writes at once](#approving-a-series-of-writes-at-once)).
+- **From the command line**: `npx mcp-twake-drive call <tool>` and `npx mcp-twake-drive tools` run every tool from a terminal or a script, with the server's configuration. A write you type in a terminal is approved without a question (`--i` asks first); a write started by an agent is refused, since agents write through their MCP tools, which ask you; without a terminal (cron), a write needs `--yes --as <name>`, for a name you allowed once in a terminal (see [From the command line](#from-the-command-line)).
 - **Sovereignty**: the server runs next to your assistant and talks directly to your Twake Drive. Pair it with a self-hosted or European AI model to keep the whole chain under your control.
 
 ## Features
