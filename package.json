@@ -64,5 +64,8 @@
   "homepage": "https://github.com/linagora/mcp-twake-drive#readme",
   "bugs": {
     "url": "https://github.com/linagora/mcp-twake-drive/issues"
+  },
+  "twake": {
+    "commandLine": 1
   }
 }

@@ -4,6 +4,9 @@ All notable changes to mcp-twake-drive are documented here. The format follows [
 
 ## [Unreleased]
 
+### Added
+- `mcp-twake-drive call <tool>` and `mcp-twake-drive tools` call the server's tools from a terminal or a script, with `--arg key=value` or `--json`, the result on stdout and an exit code per outcome. A write typed in a terminal is approved without a question (`--i` asks first); started by an agent it is refused; without a terminal it needs `--yes --as <name>` for a name allowed with `mcp-twake-drive allow-unattended <name>`.
+
 ## [0.4.1] - 2026-11-11
 
 ### Fixed
