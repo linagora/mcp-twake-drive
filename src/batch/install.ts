@@ -7,6 +7,11 @@ import { BatchStore } from './store.js';
  * approve_batch (spec §5): the user approves the exact list of a series of writes once; each write that carries the
  * batch id and matches one listed action exactly goes through without a question, if its approval text is still the
  * one approved. Installed on one McpServer before its tools are registered: it wraps their registration.
+ *
+ * What a batch approves is exactly what each action's approval text shows: the comparison of that text is what
+ * catches a target that changed since; a change the text does not show is not seen. A batch is valid only in the
+ * server instance (the session) that approved it, under the approval settings it was approved under (mode,
+ * language, account: `settings()`), for 15 minutes; every batch is forgotten when the instance closes.
  */
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
 type Handler = (...args: unknown[]) => unknown;
@@ -28,6 +33,8 @@ export interface BatchOptions {
   /** *_APPROVAL=client: the client makes the approvals, no batch */
   clientMode(): boolean;
   language(): 'en' | 'fr';
+  /** what the approvals depend on besides the text (mode, language, account…): a batch approved under other settings approves nothing */
+  settings?(): string;
   now?: () => number;
 }
 
@@ -141,6 +148,13 @@ function withNote(result: unknown, note: string): unknown {
 export function installBatch(server: McpServer, o: BatchOptions): void {
   const registry = new Map<string, Registered>();
   const store = new BatchStore(o.now);
+  const settings = (): string => `${o.clientMode() ? 'client' : 'elicit'}|${o.language()}|${o.settings?.() ?? ''}`;
+  // every batch is forgotten when the instance closes (a new connection is a new session)
+  const closed = server.server.onclose;
+  server.server.onclose = () => {
+    store.clear();
+    closed?.();
+  };
   const writes = new Set(o.writeTools);
   const batchIdSchema = o.z.string().optional().describe('The batchId approve_batch gave, when this exact call is part of an approved batch.');
 
@@ -154,9 +168,13 @@ export function installBatch(server: McpServer, o: BatchOptions): void {
       const key = keyOf(actual);
       const t = TEXT[o.language()];
       if (key === undefined) return withNote(await handler(actual, ...rest), t.unusable('these arguments cannot be compared'));
-      const item = store.reserve(batchId, name, key);
+      const item = store.reserve(batchId, name, key, settings());
       if (typeof item === 'string') {
-        const reason = item === 'expired' ? 'it expired' : item === 'unknown' ? 'no such batch in this session' : 'this exact call is not in the batch, or was already made';
+        const reason =
+          item === 'expired' ? 'it expired'
+          : item === 'unknown' ? 'no such batch in this session'
+          : item === 'changed' ? 'the approval settings changed since it was approved'
+          : 'this exact call is not in the batch, or was already made';
         return withNote(await handler(actual, ...rest), t.unusable(reason));
       }
       const { result, approved } = await runPreapproved(item.message, async () => handler(actual, ...rest));
@@ -201,7 +219,7 @@ export function installBatch(server: McpServer, o: BatchOptions): void {
   const z = o.z;
   originalTool(
     'approve_batch',
-    'Ask the user ONCE to approve a list of write actions, before making them. Give the exact tool names and arguments you will use; the answer is a batchId. Then call each tool with exactly those arguments plus batchId: it runs without another question, once, within 15 minutes. Anything not in the list, or changed since, asks as usual. Use it for a series of 3 or more similar writes the user agreed to approve together.',
+    'Ask the user ONCE for one approval of a list of write actions, before making them. Give the exact tool names and arguments you will use; the answer is a batchId. Then call each tool with exactly those arguments plus batchId: it runs without another question, once, within 15 minutes. Anything not in the list, or changed since, asks as usual. Use it for a series of 3 or more similar writes the user agreed to approve together.',
     {
       actions: z
         // arguments kept as the agent sent them (a record schema would drop keys such as __proto__ before the check below)
@@ -241,7 +259,7 @@ export function installBatch(server: McpServer, o: BatchOptions): void {
       const text = [t.header(described.length), '', ...described.map((d, i) => listed(shown(d.message), i + 1, described.length))].join('\n');
       if (text.length > MAX_TEXT) return { content: [{ type: 'text', text: t.tooLong }], isError: true };
       if (!(await o.confirm(text, extra))) return { content: [{ type: 'text', text: t.declined }] };
-      const { batchId, expiresAt } = store.create(described);
+      const { batchId, expiresAt } = store.create(described, settings());
       return { content: [{ type: 'text', text: `${t.approved}: ${JSON.stringify({ batchId, expiresAt: new Date(expiresAt).toISOString(), count: described.length })}` }] };
     },
   );

@@ -9,7 +9,7 @@ import { batchHook, BATCH_REF, installBatch } from '../../src/batch/index.js';
 type Answer = 'accept' | 'decline';
 
 /** A server with write tools behind a fake gate, and a client that answers every approval with `answers`. */
-async function setup(answers: Answer[] = [], opts: { clientMode?: boolean; catchAll?: boolean; changed?: Set<string> } = {}) {
+async function setup(answers: Answer[] = [], opts: { clientMode?: boolean; catchAll?: boolean; changed?: Set<string>; settings?: { value: string } } = {}) {
   const writes: string[] = [];
   const asked: string[] = [];
   const server = new McpServer({ name: 'fake', version: '1' });
@@ -24,6 +24,7 @@ async function setup(answers: Answer[] = [], opts: { clientMode?: boolean; catch
     confirm: (message) => ask(message),
     clientMode: () => opts.clientMode ?? false,
     language: () => 'en',
+    settings: () => opts.settings?.value ?? '',
   });
   const gate = async (text: string) => {
     if (batchHook(() => text) === 'approved') return true;
@@ -75,7 +76,17 @@ async function setup(answers: Answer[] = [], opts: { clientMode?: boolean; catch
     const id = /"batchId":"([0-9a-f]{32})"/.exec(r.text)?.[1];
     return { ...r, batchId: id };
   };
-  return { server, client, call, batchOf, writes, asked };
+  const reconnect = async () => {
+    const [c2, s2] = InMemoryTransport.createLinkedPair();
+    const next = new Client({ name: 'test', version: '1' }, { capabilities: { elicitation: {} } });
+    await server.connect(s2);
+    await next.connect(c2);
+    return async (name: string, args: Record<string, unknown>) => {
+      const r = (await next.callTool({ name, arguments: args })) as { content: { text: string }[] };
+      return r.content.map((c) => c.text).join('\n');
+    };
+  };
+  return { server, client, call, batchOf, writes, asked, reconnect };
 }
 
 describe('approve_batch', () => {
@@ -214,6 +225,7 @@ describe('approve_batch', () => {
     const t = await setup();
     const { tools } = await t.client.listTools();
     expect(tools.find((x) => x.name === 'approve_batch')?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, openWorldHint: false });
+    expect(tools.find((x) => x.name === 'approve_batch')?.description).toMatch(/approval/);
   });
 
   it('shows each action so that its own text cannot look like another action', async () => {
@@ -277,5 +289,53 @@ describe('approve_batch', () => {
     expect(t.asked[0]).toContain('[1/1] Create the note "A"');
     expect(t.asked[0]).not.toContain('Nothing to see');
     expect(t.asked[0]).not.toContain('harmless');
+  });
+
+  it('never approves a call under other approval settings than the batch was approved under', async () => {
+    const settings = { value: 'elicit|en|alice' };
+    const t = await setup(['accept', 'decline'], { settings });
+    const { batchId } = await t.batchOf([{ tool: 'create_note', arguments: { title: 'A' } }]);
+    settings.value = 'elicit|en|bob';
+    const r = await t.call('create_note', { title: 'A', batchId });
+    expect(r.text).toContain('Not done');
+    expect(r.text).toContain('approval settings changed');
+    expect(t.asked).toHaveLength(2);
+    expect(t.writes).toEqual([]);
+  });
+
+  it('forgets every batch when the server closes', async () => {
+    const t = await setup(['accept', 'decline']);
+    const { batchId } = await t.batchOf([{ tool: 'create_note', arguments: { title: 'A' } }]);
+    await t.server.close();
+    const again = await t.reconnect();
+    expect(await again('create_note', { title: 'A', batchId })).toContain('no such batch');
+    expect(t.writes).toEqual([]);
+  });
+
+  it('pre-approves only one of two parallel calls with the same batch and arguments', async () => {
+    const t = await setup(['accept', 'decline']);
+    const { batchId } = await t.batchOf([{ tool: 'create_note', arguments: { title: 'A' } }]);
+    const results = await Promise.all([t.call('create_note', { title: 'A', batchId }), t.call('create_note', { title: 'A', batchId })]);
+    expect(results.map((r) => r.text.split('\n')[0]).sort()).toEqual(['Not done', 'created']);
+    expect(t.asked).toHaveLength(2);
+    expect(t.writes).toEqual(['create A']);
+  });
+
+  it('compares again the text of an action given back after a mismatch, in the call that writes', async () => {
+    const changed = new Set<string>(['A']);
+    const t = await setup(['accept', 'decline', 'decline'], { changed });
+    changed.delete('A');
+    const { batchId } = await t.batchOf([{ tool: 'create_note', arguments: { title: 'A' } }]);
+    changed.add('A');
+    // mismatch: asks (declined), the action is given back
+    expect((await t.call('create_note', { title: 'A', batchId })).text).toContain('Not done');
+    // still changed: the given-back action is compared again, and asks again
+    expect((await t.call('create_note', { title: 'A', batchId })).text).toContain('Not done');
+    expect(t.asked).toHaveLength(3);
+    // back to what was approved: the text computed by this call matches, it runs without a question
+    changed.delete('A');
+    expect((await t.call('create_note', { title: 'A', batchId })).text).toBe('created');
+    expect(t.asked).toHaveLength(3);
+    expect(t.writes).toEqual(['create A']);
   });
 });

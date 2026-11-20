@@ -114,6 +114,8 @@ export function registerTools(
     confirm: (message) => approver.confirmText(message),
     clientMode: () => approver.opts.mode === 'client',
     language: () => approver.opts.language,
+    // the account the approval texts are written for
+    settings: () => approver.opts.as ?? '',
   });
   const L = (k: Parameters<Approver['label']>[0]) => approver.label(k);
   const humanSize = (size: number): string => client.collection(FILES_DOCTYPE).getBeautifulSize({ size }, 1);

@@ -14,6 +14,8 @@ export interface BatchItem {
 
 interface Batch {
   expiresAt: number;
+  /** the approval settings the batch was approved under (mode, language, account…), as the server describes them */
+  settings: string;
   items: BatchItem[];
 }
 
@@ -22,22 +24,26 @@ export class BatchStore {
 
   constructor(private readonly now: () => number = Date.now) {}
 
-  create(items: Omit<BatchItem, 'used'>[]): { batchId: string; expiresAt: number } {
+  create(items: Omit<BatchItem, 'used'>[], settings = ''): { batchId: string; expiresAt: number } {
     this.sweep();
     const batchId = randomBytes(16).toString('hex');
     const expiresAt = this.now() + BATCH_TTL_MS;
-    this.batches.set(batchId, { expiresAt, items: items.map((item) => ({ ...item, used: false })) });
+    this.batches.set(batchId, { expiresAt, settings, items: items.map((item) => ({ ...item, used: false })) });
     return { batchId, expiresAt };
   }
 
-  /** The first unused action of the batch with this tool and these arguments, now marked used. */
-  reserve(batchId: string, tool: string, key: string): BatchItem | 'unknown' | 'expired' | 'absent' {
+  /**
+   * The first unused action of the batch with this tool and these arguments, now marked used; nothing when the
+   * approval settings are no longer the ones the batch was approved under.
+   */
+  reserve(batchId: string, tool: string, key: string, settings = ''): BatchItem | 'unknown' | 'expired' | 'absent' | 'changed' {
     const batch = this.batches.get(batchId);
     if (!batch) return 'unknown';
     if (this.now() > batch.expiresAt) {
       this.batches.delete(batchId);
       return 'expired';
     }
+    if (batch.settings !== settings) return 'changed';
     const item = batch.items.find((i) => !i.used && i.tool === tool && i.key === key);
     if (!item) return 'absent';
     item.used = true;
@@ -47,6 +53,11 @@ export class BatchStore {
   /** The action did not go through the batch (its text changed): it stays available. */
   release(item: BatchItem): void {
     item.used = false;
+  }
+
+  /** Forgets every batch (the server instance closed). */
+  clear(): void {
+    this.batches.clear();
   }
 
   private sweep(): void {

@@ -62,4 +62,18 @@ describe('BatchStore', () => {
     t += BATCH_TTL_MS + 1;
     expect(store.reserve(batchId, 'create_event', canonical({ title: 'A' }))).toBe('expired');
   });
+
+  it('refuses a batch approved under other approval settings', () => {
+    const store = new BatchStore();
+    const { batchId } = store.create(items, 'elicit|en|alice');
+    expect(store.reserve(batchId, 'create_event', canonical({ title: 'A' }), 'elicit|en|bob')).toBe('changed');
+    expect(store.reserve(batchId, 'create_event', canonical({ title: 'A' }), 'elicit|en|alice')).toMatchObject({ message: 'Create A' });
+  });
+
+  it('forgets every batch on clear', () => {
+    const store = new BatchStore();
+    const { batchId } = store.create(items);
+    store.clear();
+    expect(store.reserve(batchId, 'create_event', canonical({ title: 'A' }))).toBe('unknown');
+  });
 });

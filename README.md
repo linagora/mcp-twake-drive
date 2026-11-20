@@ -225,7 +225,7 @@ npx mcp-twake-drive call upload_file --json @upload.json
 
 ## Approving a series of writes at once
 
-Before a series of writes (several folders or uploads), an agent can ask you once for the whole list with `approve_batch`: you see every action, numbered, in one approval. Each call that then carries the `batchId` and matches a listed action exactly runs without another question, once, within 15 minutes. A call that is not in the list, or whose target changed since you approved, asks as usual. With `TWAKE_DRIVE_APPROVAL=client`, there is no batch.
+Before a series of writes (several folders or uploads), an agent can ask you once for the whole list with `approve_batch`: you see every action, numbered, in one approval. Each call that then carries the `batchId` and matches a listed action exactly runs without another question, once, within 15 minutes. A call that is not in the list, or whose target changed since you approved, asks as usual. A batch approves exactly what each action's approval text shows; it belongs to the session that approved it, and is forgotten when that session ends. With `TWAKE_DRIVE_APPROVAL=client`, there is no batch.
 
 ## Recommended safe configuration
 
